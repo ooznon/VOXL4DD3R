@@ -151,16 +151,37 @@ test("ManualSpeed omits the redundant default row and writes only the speed step
 	assert.ok(sp[1].includes("AIRR_ScaX"));
 });
 
-test("continuous speed ramps are sampled per pulse with full float precision", () => {
+test("continuous speed ramps keep linear regions per-pulse and subsample curved ones", () => {
 	const sp = section(convertKsonToVox(readFixture("speed-curve.kson")), "SPCONTROLER");
-	const speed = sp.filter(row => row.includes("ManualSpeed"));
-	assert.ok(speed.length > 1900, `continuous ramp is sampled per pulse (got ${speed.length})`);
-	// Pulse 0 holds the default 1.0 -> suppressed; sampling starts at pulse 1.
+	const speed = sp.filter(r => r.includes("ManualSpeed"));
+	// Linear ramp (pulses 1..959) stays sampled per pulse with full float
+	// precision; the curved ramp (960..1920) is subsampled to cut row count.
 	assert.equal(speed[0].split("\t")[0], "001,01,01");
 	assert.ok(speed[0].includes("f1.0005208333333333"), "full float precision is retained");
-	// The ramp ends exactly on the graph's last point.
-	assert.deepEqual(speed.at(-1).split("\t").slice(0, 2), ["003,01,00", "ManualSpeed"]);
-	assert.ok(speed.at(-1).includes("f0.5"));
+	const pulseOf = row => {
+		const [m, b, t] = row.split("\t")[0].split(",").map(Number);
+		return (m - 1) * 960 + (b - 1) * 240 + t;
+	};
+	const linearRows = speed.filter(r => pulseOf(r) < 960);
+	const curvedRows = speed.filter(r => pulseOf(r) >= 960);
+	assert.equal(linearRows.length, 959, "the linear ramp is still sampled per pulse");
+	assert.ok(curvedRows.length < 400, `the curved ramp is subsampled (got ${curvedRows.length} rows)`);
+	assert.ok(speed.at(-1).split("\t")[0] === "003,01,00" && speed.at(-1).includes("f0.5"), "the ramp still ends exactly on the graph's last point");
+	// The value held between rows must never drift from the true bezier ramp
+	// (1.5 -> 0.5, controls [0.2, 0.8]) by more than max(0.005, 0.5%).
+	const held = new Map();
+	for (const row of speed) held.set(pulseOf(row), Number(row.split("\t")[4].slice(1)));
+	let last = 1;
+	for (let p = 1; p <= 1920; p++) {
+		if (held.has(p)) last = held.get(p);
+		const t = p < 960 ? p / 960 : (p - 960) / 960;
+		const trueValue = p < 960
+			? 1 + 0.5 * t
+			: 1.5 - evaluateKsonCurve(0.2, 0.8, t);
+		const bound = Math.max(0.005, Math.abs(trueValue) * 0.005);
+		assert.ok(Math.abs(trueValue - last) < bound + 1e-12,
+			`held speed at pulse ${p} stays within the tolerance (held ${last}, true ${trueValue})`);
+	}
 });
 
 test("stops become ManualSpeed f0 blocks that resume at the graph value", () => {

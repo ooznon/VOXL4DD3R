@@ -1698,7 +1698,25 @@ export function convertKsonToVox(chart, warn = () => {}) {
 		}
 		for (let i = 0; i + 1 < scroll.length; i++) {
 			if (scroll[i].to !== scroll[i + 1].from) {
-				for (let p = scroll[i].pulse + 1; p < scroll[i + 1].pulse; p++) stepPulses.add(p);
+				const start = scroll[i].pulse;
+				const end = scroll[i + 1].pulse;
+				if (parseCurvePair(scroll[i].curve)) {
+					// Curved ramps are subsampled: a step is kept whenever the
+					// curve drifts max(0.005, 0.5% of the value) away from the
+					// last kept step, bounding the piecewise-constant error
+					// while avoiding 240 rows per beat on long smooth curves.
+					// (Linear ramps stay per-pulse, matching the reference.)
+					let kept = scrollAt(start);
+					for (let p = start + 1; p < end; p++) {
+						const value = scrollAt(p);
+						if (Math.abs(value - kept) >= Math.max(0.005, Math.abs(value) * 0.005)) {
+							stepPulses.add(p);
+							kept = value;
+						}
+					}
+				} else {
+					for (let p = start + 1; p < end; p++) stepPulses.add(p);
+				}
 			}
 		}
 		const baseSteps = [...stepPulses].sort((a, b) => a - b).map((pulse) => ({
