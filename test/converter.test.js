@@ -223,6 +223,31 @@ test("decorative laser tail sections clip scroll, stops and END POSITION at the 
 	assert.ok(warnings.some(w => w.includes("decorative")));
 });
 
+test("ManualSpeed output magnitude is capped at 10000", () => {
+	// Extreme KSON scroll values (e.g. 1000000) stutter native playback, so
+	// the emitted magnitude is clamped to ±10000 — also after the reference
+	// float-clock fit, which otherwise nudges the capped value back above the
+	// limit on long spans (float32 absolute-seconds rounding).
+	const vox = convertKsonToVox({
+		meta: {},
+		beat: {
+			bpm: [[0, 185]],
+			time_sig: [[0, [4, 4]]],
+			scroll_speed: [[0, 1], [96000, [1, 1000000]], [96017, 1000000]],
+		},
+		note: {
+			bt: [[[0, 96480]], [], [], []],
+			fx: [[], []],
+			laser: [[], []],
+		},
+	}, () => {});
+	const speed = section(vox, "SPCONTROLER").filter(r => r.includes("ManualSpeed"));
+	const values = speed.map(r => Number(r.split("\t")[4].slice(1)));
+	assert.ok(values.some(v => v === 10000), "the capped value is emitted");
+	const over = values.filter(v => Math.abs(v) > 10000);
+	assert.deepEqual(over, [], "no ManualSpeed exceeds the ±10000 cap");
+});
+
 // ---------------------------------------------------------------------------
 // FX / BT notes
 // ---------------------------------------------------------------------------

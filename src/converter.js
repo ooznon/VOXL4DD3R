@@ -1875,15 +1875,19 @@ export function convertKsonToVox(chart, warn = () => {}) {
 		// The VOX default speed is 1.0, so the reference omits the redundant
 		// initial row when the chart starts at the default.
 		// Extreme KSON scroll speeds (e.g. 1000000) stutter native playback,
-		// so the emitted magnitude is capped at ±10000.
+		// so the emitted magnitude is capped at ±10000 — both the raw step
+		// value and the float-clock-fitted result (the fit otherwise nudges
+		// the capped value back above the limit: its float32 absolute-seconds
+		// clock deviates from the linear distance on long spans).
 		const MAX_LANE_SPEED = 10000;
+		const capSpeed = (v) => (v > MAX_LANE_SPEED ? MAX_LANE_SPEED : (v < -MAX_LANE_SPEED ? -MAX_LANE_SPEED : v));
 		let last = 1;
 		let bpmIndex = 0;
 		for (let i = 0; i < steps.length; i++) {
 			const { pulse, value } = steps[i];
 			while (bpmIndex + 1 < bpmTable.length && bpmTable[bpmIndex + 1].pulse <= pulse) bpmIndex++;
-			const capped = value > MAX_LANE_SPEED ? MAX_LANE_SPEED : (value < -MAX_LANE_SPEED ? -MAX_LANE_SPEED : value);
-			const fitted = fitSpeedValue(capped, pulse, steps[i + 1]?.pulse, bpmTable[bpmIndex]?.bpm ?? 120);
+			const capped = capSpeed(value);
+			const fitted = capSpeed(fitSpeedValue(capped, pulse, steps[i + 1]?.pulse, bpmTable[bpmIndex]?.bpm ?? 120));
 			if (fitted !== last) {
 				spRows.push(`${timeline.format(pulse)}\tManualSpeed\t0\t0\tf${formatSpeedValue(fitted)}\t0\t0\t0`);
 				last = fitted;
