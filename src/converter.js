@@ -1025,7 +1025,7 @@ export function attachSpins(sections, spinEvents) {
  * TRACK ORIGINAL L/R dialect. Returns {rows, endPulse}.
  */
 function emitLaserTrack(timeline, sections, attachments, opts) {
-	const { originals = false, lane = 0, bpmEvents = [], laserControlPulses = [] } = opts ?? {};
+	const { originals = false, lane = 0, bpmEvents = [], laserControlPulses = [], audioFx = null } = opts ?? {};
 	const rows = [];
 	let maxPulse = 0;
 	let curvedWarned = false;
@@ -1045,8 +1045,8 @@ function emitLaserTrack(timeline, sections, attachments, opts) {
 		maxPulse = Math.max(maxPulse, last.pulse);
 
 		const built = [];
-		const push = (pulse, value, ct, spin, spinDur, comment) => {
-			built.push({ pulse, value, ct, spin, spinDur, comment });
+		const push = (pulse, value, ct, spin, spinDur, comment, curve) => {
+			built.push({ pulse, value, ct, spin, spinDur, comment, curve });
 		};
 		const fmtVal = (v) => (Object.is(v, -0) ? "0.000000" : v.toFixed(6));
 
@@ -1090,10 +1090,10 @@ function emitLaserTrack(timeline, sections, attachments, opts) {
 					comment = `// KSON camera.cam.pattern.laser.slam_event.${spin.kind}`;
 					maxPulse = Math.max(maxPulse, point.pulse + spin.len, Math.ceil(spin.fit.endPulse - 1e-4));
 				}
-				push(point.pulse, point.from, 0, spinCode, spinDur, comment);
-				push(point.pulse, point.to, segCt, 0, 0, null);
+				push(point.pulse, point.from, 0, spinCode, spinDur, comment, point.curve);
+				push(point.pulse, point.to, segCt, 0, 0, null, point.curve);
 			} else {
-				push(point.pulse, point.from, segCt, 0, 0, null);
+				push(point.pulse, point.from, segCt, 0, 0, null, point.curve);
 			}
 			if (!moving || originals) continue;
 			curvedWarned = true;
@@ -1111,18 +1111,49 @@ function emitLaserTrack(timeline, sections, attachments, opts) {
 			const toValue = next.from;
 			for (const p of [...samplePulses].sort((a, b) => a - b)) {
 				const y = curveY(point.curve, span > 0 ? (p - point.pulse) / span : 1);
-				push(p, fromValue + (toValue - fromValue) * y, segCt, 0, 0, null);
+				push(p, fromValue + (toValue - fromValue) * y, segCt, 0, 0, null, point.curve);
 			}
 		}
 
 		// Reference row rules: a lone row is duplicated, and seg is positional
 		// (first row 1, last row 2, every other row 0).
 		if (built.length === 1) built.push({ ...built[0] });
-		for (let idx = 0; idx < built.length; idx++) {
-			const row = built[idx];
-			const seg = idx === 0 ? 1 : (idx === built.length - 1 ? 2 : 0);
+		let list = built;
+		if (audioFx) {
+			// Reference module 14131 rewrite: audio-effect control pulses
+			// strictly inside a segment get interpolated rows (the
+			// segment's last row and same-pulse slam pairs excluded), then
+			// every row carries the active native laser filter id in field 4.
+			// TRACK ORIGINAL keeps an interpolated row only when the control
+			// pulse switches the active filter id — the playable tracks keep
+			// every control pulse (same-pulse slam pairs excluded either way).
+			list = [];
+			for (let idx = 0; idx < built.length; idx++) {
+				const row = built[idx];
+				list.push(row);
+				const next = built[idx + 1];
+				if (!next || next.pulse <= row.pulse) continue;
+				for (const control of audioFx.controlPulses) {
+					if (control <= row.pulse) continue;
+					if (control >= next.pulse) break;
+					if (originals && audioFx.filterAt(control) === audioFx.filterAt(control - 1)) continue;
+					// The interpolated row evaluates the bracket row's outgoing
+					// KSON curve (reference emits curveY-based values — the
+					// TRACK ORIGINAL rows match a segment-curve evaluation, not
+					// a linear blend between the bracket rows).
+					const t = (control - row.pulse) / (next.pulse - row.pulse);
+					const y = curveY(row.curve, t);
+					const value = Number(Number(row.value + (next.value - row.value) * y).toPrecision(12));
+					list.push({ pulse: control, value, ct: row.ct, spin: 0, spinDur: 0, comment: null });
+				}
+			}
+			for (const row of list) row.filter = audioFx.filterAt(row.pulse);
+		}
+		for (let idx = 0; idx < list.length; idx++) {
+			const row = list[idx];
+			const seg = idx === 0 ? 1 : (idx === list.length - 1 ? 2 : 0);
 			const comment = originals ? null : row.comment;
-			rows.push(`${timeline.format(row.pulse)}\t${fmtVal(row.value)}\t${seg}\t${row.spin}\t0\t${width}\t0\t${row.ct}\t0\t${row.spinDur}\t0${comment ? `\t${comment}` : ""}`);
+			rows.push(`${timeline.format(row.pulse)}\t${fmtVal(row.value)}\t${seg}\t${row.spin}\t${row.filter || 0}\t${width}\t0\t${row.ct}\t0\t${row.spinDur}\t0${comment ? `\t${comment}` : ""}`);
 		}
 	}
 	return { rows, endPulse: maxPulse, curved: curvedWarned };
@@ -1484,15 +1515,103 @@ export function convertKsonToVox(chart, warn = () => {}) {
 			(list) => (Array.isArray(list) ? list.map((entry) => entry?.[0]) : []),
 		)),
 	].filter((p) => Number.isSafeInteger(p) && p >= 0).sort((a, b) => a - b);
+
+	// --------------------------------------------- laser audio effects (14131)
+	// Reference module 14131 `oS`: laser defs resolve by name (def.type with
+	// def.v, param_change at the pulse); `Q` maps each row's active effect to
+	// a native laser filter id, deduplicated into TAB EFFECT INFO presets.
+	const laserWarned = new Set();
+	const laserWarn = (message) => {
+		if (laserWarned.has(message)) return;
+		laserWarned.add(message);
+		warn(message);
+	};
+	const laserDefs = Array.isArray(laserFx.def) ? laserFx.def : [];
+	const laserParamChange = laserFx.param_change ?? {};
+	const resolveLaser = (name, pulse) => {
+		const def = laserDefs.find((d) => d[0] === name)?.[1];
+		const type = def?.type || name;
+		const values = { ...(EFFECT_DEFAULTS[type] ?? {}), ...(def?.v ?? {}) };
+		const changes = laserParamChange[name];
+		if (changes) {
+			for (const [param, list] of Object.entries(changes)) {
+				let best;
+				for (const entry of Array.isArray(list) ? list : []) {
+					const p = Math.round(Number(entry[0]));
+					if (p <= pulse && (!best || p >= best.pulse)) best = { pulse: p, value: entry[1] };
+				}
+				if (best) values[param] = best.value;
+			}
+		}
+		return { type, values };
+	};
+	const laserPulseEvents = Object.entries(laserFx.pulse_event ?? {})
+		.flatMap(([name, list]) => (Array.isArray(list) ? list.map((entry) => ({ pulse: Number(entry), name })) : []))
+		.sort((a, b) => a.pulse - b.pulse);
+	// Reference `Y`: audio control pulses (pulse_event + param_change — no
+	// BPM) driving the interpolation rows; distinct from `X` above.
+	const laserAudioControls = [...new Set([
+		...laserPulseEvents.map((e) => e.pulse),
+		...Object.values(laserParamChange).flatMap((params) => Object.values(params ?? {}).flatMap(
+			(list) => (Array.isArray(list) ? list.map((entry) => Number(entry[0])) : []),
+		)),
+	])].filter((p) => Number.isFinite(p)).sort((a, b) => a - b);
+	const laserFilterPresets = [];
+	const laserFilterIds = new Map();
+	const laserNativeFilter = (resolved, name) => {
+		const { type, values } = resolved;
+		if (!type || type === "peaking_filter") {
+			if (Object.keys(values).some((k) => !["v", "gain", "mix"].includes(k)) || values.gain !== "50%" || values.mix !== "0%>100%") {
+				laserWarn("Custom KSON peaking-filter gain/frequency/mix is preserved; VOX filter 0 uses the native fixed peaking response.");
+			}
+			return { id: 0 };
+		}
+		const mix = 100 * sVal(values.mix, "max", 1);
+		if (type === "bitcrusher") {
+			const reduction = sVal(values.reduction, "max", 30);
+			if (reduction > 30 || reduction <= 0) {
+				laserWarn(`Laser effect “${name}” exceeds native bitcrusher limits and is preserved without a substitute.`);
+				return { id: 0 };
+			}
+			laserWarn("KSON laser effects use native filter curves; KSM positional interpolation and wet levels may differ.");
+			return { type: 3, params: [mix, reduction] };
+		}
+		if (type === "low_pass_filter" || type === "high_pass_filter") {
+			const isLow = type === "low_pass_filter";
+			laserWarn("KSON laser filters use native cutoff defaults and positional curves; KSM client-specific filter gain and resonance are preserved in the source archive.");
+			return {
+				type: isLow ? 1 : 2,
+				params: [mix, sVal(values.freq, "min", isLow ? 400 : 40), sVal(values.freq_max, "max", isLow ? 18000 : 5000), sVal(values.q, "max", 0.7)],
+			};
+		}
+		laserWarn(`Laser effect “${name}” (${type}) requires FX-parameter automation without a verified native mapping; it is preserved without substituting an unrelated filter.`);
+		return { id: 0 };
+	};
+	const laserFilterAt = (pulse) => {
+		const event = laserPulseEvents.filter((e) => e.pulse <= pulse).at(-1);
+		const name = event?.name ?? "peaking_filter";
+		const native = laserNativeFilter(resolveLaser(name, pulse), name);
+		if ("id" in native) return native.id;
+		const key = formatEffectRow(native);
+		if (!laserFilterIds.has(key)) {
+			laserFilterPresets.push(native);
+			laserFilterIds.set(key, laserFilterPresets.length);
+		}
+		return laserFilterIds.get(key);
+	};
+	const laserAudioFx = laserAudioControls.length
+		? { controlPulses: laserAudioControls, filterAt: laserFilterAt }
+		: null;
+
 	let laserCurved = false;
 	if (laserSections[0].length) {
-		const main = emitLaserTrack(timeline, laserSections[0], attachments, { lane: 0, bpmEvents: spinBpmEvents, laserControlPulses });
+		const main = emitLaserTrack(timeline, laserSections[0], attachments, { lane: 0, bpmEvents: spinBpmEvents, laserControlPulses, audioFx: laserAudioFx });
 		trackRows[0] = main.rows;
 		laserEndPulse = Math.max(laserEndPulse, main.endPulse);
 		laserCurved = laserCurved || main.curved;
 	}
 	if (laserSections[1].length) {
-		const main = emitLaserTrack(timeline, laserSections[1], attachments, { lane: 1, bpmEvents: spinBpmEvents, laserControlPulses });
+		const main = emitLaserTrack(timeline, laserSections[1], attachments, { lane: 1, bpmEvents: spinBpmEvents, laserControlPulses, audioFx: laserAudioFx });
 		trackRows[7] = main.rows;
 		laserEndPulse = Math.max(laserEndPulse, main.endPulse);
 		laserCurved = laserCurved || main.curved;
@@ -1500,8 +1619,8 @@ export function convertKsonToVox(chart, warn = () => {}) {
 	if (laserCurved) {
 		warn("Curved KSON lasers use 64th-note samples for VOX playback; authored points, slams and effect changes retain their exact timing. Preserve the KSON source to recover its exact curve controls.");
 	}
-	const originalL = laserSections[0].length ? emitLaserTrack(timeline, laserSections[0], attachments, { originals: true, lane: 0, bpmEvents: spinBpmEvents }).rows : [];
-	const originalR = laserSections[1].length ? emitLaserTrack(timeline, laserSections[1], attachments, { originals: true, lane: 1, bpmEvents: spinBpmEvents }).rows : [];
+	const originalL = laserSections[0].length ? emitLaserTrack(timeline, laserSections[0], attachments, { originals: true, lane: 0, bpmEvents: spinBpmEvents, audioFx: laserAudioFx }).rows : [];
+	const originalR = laserSections[1].length ? emitLaserTrack(timeline, laserSections[1], attachments, { originals: true, lane: 1, bpmEvents: spinBpmEvents, audioFx: laserAudioFx }).rows : [];
 
 	// --------------------------------------------------------------- camera
 	// Reference `aJ`: legacy projection only for numeric #KSH_VERSION in
@@ -1755,12 +1874,16 @@ export function convertKsonToVox(chart, warn = () => {}) {
 		scrollEndPulse = steps.length ? steps[steps.length - 1].pulse : 0;
 		// The VOX default speed is 1.0, so the reference omits the redundant
 		// initial row when the chart starts at the default.
+		// Extreme KSON scroll speeds (e.g. 1000000) stutter native playback,
+		// so the emitted magnitude is capped at ±10000.
+		const MAX_LANE_SPEED = 10000;
 		let last = 1;
 		let bpmIndex = 0;
 		for (let i = 0; i < steps.length; i++) {
 			const { pulse, value } = steps[i];
 			while (bpmIndex + 1 < bpmTable.length && bpmTable[bpmIndex + 1].pulse <= pulse) bpmIndex++;
-			const fitted = fitSpeedValue(value, pulse, steps[i + 1]?.pulse, bpmTable[bpmIndex]?.bpm ?? 120);
+			const capped = value > MAX_LANE_SPEED ? MAX_LANE_SPEED : (value < -MAX_LANE_SPEED ? -MAX_LANE_SPEED : value);
+			const fitted = fitSpeedValue(capped, pulse, steps[i + 1]?.pulse, bpmTable[bpmIndex]?.bpm ?? 120);
 			if (fitted !== last) {
 				spRows.push(`${timeline.format(pulse)}\tManualSpeed\t0\t0\tf${formatSpeedValue(fitted)}\t0\t0\t0`);
 				last = fitted;
@@ -1956,6 +2079,94 @@ export function convertKsonToVox(chart, warn = () => {}) {
 		spRows.push(`${timeline.format(point.pulse)}\tTilt\t2\t${dur}\tf0\tf0\t1\t0\t// KSON camera.tilt`);
 	}
 
+	// Reference module 14131 `V`: KSON laser Gate "Off" values become native
+	// AUTO tab notes over the control-pulse intervals where the gate's off-mix
+	// is audible (and no physical FX hold overlaps), deduplicated into preset
+	// pairs (the blank slot rule in `allocatePreset` keeps FX ids identical).
+	const endPulseBound = timeline.pulseAtPosition({ measure: timeline.position(endPulse).measure + 1, beat: 1, tick: 0 });
+	const gateNames = [...new Set([
+		...laserDefs.map((d) => d[0]),
+		...Object.keys(laserParamChange),
+	])].filter((name) => resolveLaser(name, 0).type === "gate");
+	const autoTabRows = [];
+	if (gateNames.length && endPulseBound > 0) {
+		const fxHolds = fxLanes.flat().filter((n) => n.length > 0).map((n) => ({ start: n.pulse, end: n.pulse + n.length }));
+		const laserSpans = laserSections.flatMap((lane) => lane
+			.map((sec) => ({ start: Number(sec[0]), end: Number(sec[0]) + Number(sec[1]?.[sec[1].length - 1]?.[0] || 0) }))
+			.filter((span) => span.end > span.start))
+			.sort((a, b) => a.start - b.start);
+		const firstBpm = bpmTable[0]?.bpm ?? 120;
+		const bpmAt = (pulse) => {
+			let value = firstBpm;
+			for (const entry of bpmTable) if (entry.pulse <= pulse) value = entry.bpm;
+			return value;
+		};
+		const controlPulses = [...new Set([
+			0,
+			endPulseBound,
+			...laserPulseEvents.map((e) => e.pulse),
+			...gateNames.flatMap((name) => Object.values(laserParamChange[name] ?? {}).flatMap(
+				(list) => (Array.isArray(list) ? list.map((entry) => Number(entry[0])) : []),
+			)),
+			...fxHolds.flatMap((hold) => [hold.start, hold.end]),
+			...bpmTable.map((entry) => entry.pulse),
+		])].filter((p) => Number.isFinite(p) && p >= 0 && p <= endPulseBound).sort((a, b) => a - b);
+		const formatRange = (from, to) => `${timeline.format(from)}–${timeline.format(to)}`;
+		const mappings = [];
+		for (let i = 0; i + 1 < controlPulses.length; i++) {
+			const start = controlPulses[i];
+			const end = controlPulses[i + 1];
+			const lastEvent = laserPulseEvents.filter((e) => e.pulse <= start).at(-1);
+			const activeName = lastEvent?.name ?? "peaking_filter";
+			const candidates = gateNames.filter((name) => name !== activeName)
+				.map((name) => ({ name, ...resolveLaser(name, start) }))
+				.filter((entry) => sVal(entry.values.mix, "off", 0) > 0);
+			if (!candidates.length) continue;
+			if (fxHolds.some((hold) => hold.start < end && hold.end > start)) {
+				laserWarn(`KSON laser Gate Off values at ${formatRange(start, end)} overlap a physical FX hold. That automatic layer is preserved without replacing the hold's native effect.`);
+				continue;
+			}
+			if (candidates.length > 2) {
+				laserWarn(`KSON laser Gate Off values at ${formatRange(start, end)} have ${candidates.length} layers. Native AUTO uses the first two in definition order; additional layers remain in the source archive.`);
+			}
+			const natives = candidates.slice(0, 2).map((entry) => ({
+				name: entry.name,
+				native: mapEffect(entry.type, Object.fromEntries(Object.entries(entry.values).map(
+					([key, value]) => [key, parseRange(value)?.off ?? value],
+				)), laserWarn, 4),
+			})).filter((entry) => entry.native.type);
+			if (!natives.length) continue;
+			const id = allocatePreset(natives[0]?.native, natives[1]?.native);
+			if (!id) continue;
+			const names = natives.map((entry) => entry.name);
+			const last = mappings.at(-1);
+			if (last?.endPulse === start && last.effectId === id && JSON.stringify(last.names) === JSON.stringify(names)) {
+				last.endPulse = end;
+			} else {
+				mappings.push({ startPulse: start, endPulse: end, effectId: id, names });
+			}
+		}
+		for (const mapping of mappings) {
+			let cursor = mapping.startPulse;
+			for (const span of laserSpans) {
+				if (!(span.end <= cursor || span.start >= mapping.endPulse)) {
+					if (span.start > cursor) break;
+					cursor = Math.max(cursor, span.end);
+					if (cursor >= mapping.endPulse) break;
+				}
+			}
+			if (cursor < mapping.endPulse) {
+				laserWarn(`KSON automatic Gate ${mapping.names.join(" + ")} at ${formatRange(mapping.startPulse, mapping.endPulse)} includes time without a real laser. Native AUTO is audible only while a real laser is active; no notes were added.`);
+			}
+		}
+		if (mappings.length) {
+			laserWarn("KSON laser Gate Off values were converted into editable native AUTO presets. They keep the selected laser filter and use the SDVX Gate algorithm.");
+		}
+		for (const mapping of mappings) {
+			autoTabRows.push(`${timeline.format(mapping.startPulse)}\t${mapping.endPulse - mapping.startPulse}\t${mapping.effectId}\t0\t// KSON laser Off: ${mapping.names.map((n) => JSON.stringify(n)).join(" + ")}`);
+		}
+	}
+
 	// ------------------------------------------------------------- sections
 	// One comment row per unified tilt entry (named modes keep their KSON name).
 	const tiltModeRows = ["001,01,00\t0"];
@@ -1987,22 +2198,26 @@ export function convertKsonToVox(chart, warn = () => {}) {
 		["BPM INFO", bpmRows],
 		["TILT MODE INFO", tiltModeRows],
 		["END POSITION", [`${pad(endMeasure, 3)},01,00`]],
-		["TAB EFFECT INFO", []],
+		["TAB EFFECT INFO", laserFilterPresets.map((effect) => formatEffectRow(effect))],
 		// Presets hold after the FX note walk above, so `presetPairs` is final:
 		// two rows per pair (FX-L line, FX-R line), and two param assignments.
 		["FXBUTTON EFFECT INFO", presetPairs.flatMap((pair) => pair.map((effect) => formatEffectRow(effect)))],
 		["TAB PARAM ASSIGN INFO", presetPairs.flatMap((pair, index) => pair.map(() => `${index}, 0, 0, 0`))],
 		...trackRows.map((rows, index) => [`TRACK${index + 1}`, rows]),
 		["SPCONTROLER", spRows],
+		// Reference: a populated TRACK AUTO TAB block is serialized directly
+		// after SPCONTROLLER; when empty it falls back to the slot just above
+		// TRACK ORIGINAL L (between REVERB and the ORIGINAL tracks).
+		...(autoTabRows.length ? [["TRACK AUTO TAB", autoTabRows]] : []),
 		["LYRIC INFO", []],
 		["REVERB EFFECT PARAM", []],
-		["TRACK AUTO TAB", []],
+		...(autoTabRows.length ? [] : [["TRACK AUTO TAB", autoTabRows]]),
 		["TRACK ORIGINAL L", originalL],
 		["TRACK ORIGINAL R", originalR],
 	];
 
 	// Reference parity: the writer emits one extra blank line after the
-	// SPCONTROLLER block (3 blank lines before #LYRIC INFO, 2 elsewhere).
+	// SPCONTROLLER block (3 blank lines after #SPCONTROLER's #END, 2 elsewhere).
 	const text = sections
 		.map(([name, rows]) => `#${name}\n${rows.length ? `${rows.join("\n")}\n` : ""}#END\n${name === "SPCONTROLER" ? "\n" : ""}`)
 		.join("\n\n");
