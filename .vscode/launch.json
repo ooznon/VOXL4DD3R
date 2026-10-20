@@ -1,0 +1,23 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Convert KSON to VOX",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/cli.js",
+      "args": [
+        "${input:ksonFile}"
+      ],
+      "console": "integratedTerminal"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "ksonFile",
+      "type": "promptString",
+      "description": "Full path to the KSON chart",
+      "default": "testdata/curve-scroll.kson"
+    }
+  ]
+}

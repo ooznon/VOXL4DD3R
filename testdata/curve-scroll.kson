@@ -1,0 +1,34 @@
+{
+  "format_version": 1,
+  "meta": {
+    "title": "Curve and lane-speed fixture",
+    "artist": "Local test",
+    "chart_author": "Converter test",
+    "level": 1,
+    "difficulty": {
+      "idx": 2,
+      "name": "exhaust"
+    },
+    "disp_bpm": "120"
+  },
+  "beat": {
+    "bpm": [[0, 120]],
+    "time_sig": [[0, [4, 4]]],
+    "scroll_speed": [
+      [0, 1.0],
+      [960, [1.0, 1.5]],
+      [1920, [1.5, 0.5]]
+    ]
+  },
+  "note": {
+    "bt": [[[0, 480]], [], [], []],
+    "fx": [[], []],
+    "laser": [
+      [
+        [0, [[0, 0.0, [0.2, 0.8]], [480, 1.0]], 1],
+        [960, [[0, 1.0, [0.8, 0.2]], [480, 0.0]], 1]
+      ],
+      []
+    ]
+  }
+}

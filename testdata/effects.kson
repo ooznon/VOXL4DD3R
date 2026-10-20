@@ -1,0 +1,41 @@
+{
+  "format_version": 1,
+  "meta": {
+    "title": "KSON effects fixture",
+    "artist": "Local test",
+    "chart_author": "Converter test",
+    "level": 1,
+    "difficulty": {
+      "idx": 2,
+      "name": "exhaust"
+    },
+    "disp_bpm": "120"
+  },
+  "beat": {
+    "bpm": [[0, 120]],
+    "time_sig": [[0, [4, 4]]]
+  },
+  "note": {
+    "bt": [[], [], [], []],
+    "fx": [[[0, 480, "r"]], []],
+    "laser": [
+      [[0, [[0, 0.0], [480, 1.0]], 1, { "effect": "hp" }]],
+      []
+    ]
+  },
+  "audio": {
+    "audio_effect": {
+      "fx": {
+        "def": [
+          ["r", { "type": "retrigger", "v": { "update_period": "1/4", "wave_length": "0.25", "rate": "70%", "mix": "100%" } }],
+          ["unused_wobble", { "type": "wobble", "v": { "wave_length": "0.25", "freq_1": "500Hz", "freq_2": "12000Hz", "q": "1.414", "mix": "60%" } }]
+        ]
+      },
+      "laser": {
+        "def": [
+          ["hp", { "type": "high_pass_filter", "v": { "freq": "80Hz", "freq_max": "2000Hz", "mix": "90%" } }]
+        ]
+      }
+    }
+  }
+}

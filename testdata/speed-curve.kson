@@ -1,0 +1,28 @@
+{
+  "format_version": 1,
+  "meta": {
+    "title": "KSON speed-curve fixture",
+    "artist": "Local test",
+    "chart_author": "Converter test",
+    "level": 1,
+    "difficulty": {
+      "idx": 2,
+      "name": "exhaust"
+    },
+    "disp_bpm": "120"
+  },
+  "beat": {
+    "bpm": [[0, 120]],
+    "time_sig": [[0, [4, 4]]],
+    "scroll_speed": [
+      [0, 1.0],
+      [960, 1.5, [0.2, 0.8]],
+      [1920, 0.5]
+    ]
+  },
+  "note": {
+    "bt": [[], [], [], []],
+    "fx": [[], []],
+    "laser": [[], []]
+  }
+}

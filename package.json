@@ -1,0 +1,14 @@
+{
+  "name": "voxl4dd3r",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "KSH/KSON to SOUND VOLTEX VOX v13 converter with byte-level parity against the sdvxindex.com editor export",
+  "scripts": {
+    "convert": "node src/cli.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
