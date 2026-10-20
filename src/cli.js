@@ -4,8 +4,19 @@ import { fileURLToPath } from "node:url";
 import { convertKsonToVox } from "./converter.js";
 
 function printUsage() {
-	console.error("Usage: node src/cli.js <input.ksh|input.kson> [output.vox]");
+	console.error([
+		"Usage:",
+		"  node src/cli.js <input.ksh|input.kson> [output.vox]",
+		"  node src/cli.js <file|dir>... [-o <outputDir>]",
+		"",
+		"Batch mode converts every .ksh/.kson chart given; directory arguments",
+		"are scanned recursively. Outputs are written beside each input, or",
+		"mirrored under <outputDir> when -o/--out is passed. One failing chart",
+		"does not stop the rest of the batch.",
+	].join("\n"));
 }
+
+const CHART_EXT = new Set([".ksh", ".kson"]);
 
 // Returns {chart, warnings} — KSH files are decoded from raw bytes
 // (UTF-8 with BOM, else strict Shift-JIS) before parsing.
@@ -23,20 +34,12 @@ async function loadChart(inputPath) {
 	throw new Error("Input must be a .ksh or .kson chart.");
 }
 
-async function main(args) {
-	if (args.length < 1 || args.length > 2 || args[0] === "--help" || args[0] === "-h") {
-		printUsage();
-		return args[0] === "--help" || args[0] === "-h" ? 0 : 2;
-	}
-
-	const inputPath = path.resolve(args[0]);
-	const outputPath = args[1]
-		? path.resolve(args[1])
-		: path.join(path.dirname(inputPath), `${path.basename(inputPath, path.extname(inputPath))}.vox`);
-
+/** Convert one chart and write the .vox; prints its own summary + warnings. */
+async function convertOne(inputPath, outputPath, { batch = false } = {}) {
 	const { chart, warnings: parseWarnings } = await loadChart(inputPath);
 	const converterWarnings = [];
 	const vox = convertKsonToVox(chart, (message) => converterWarnings.push(message));
+	fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 	fs.writeFileSync(outputPath, Buffer.from(vox, "ascii"));
 
 	const warnings = [...new Set([...parseWarnings, ...converterWarnings])];
@@ -44,14 +47,149 @@ async function main(args) {
 		const match = new RegExp(`^#${name}\\n([\\s\\S]*?)^#END$`, "m").exec(vox);
 		return match && match[1].trim() ? match[1].trim().split("\n").length : 0;
 	};
-	console.log(`Wrote ${outputPath}`);
+	const label = batch
+		? `${path.basename(inputPath)} -> ${outputPath}`
+		: `Wrote ${outputPath}`;
+	console.log(label);
 	console.log(
 		`VOX v13 · ${sectionRows("TRACK1") + sectionRows("TRACK8")} laser nodes · ${sectionRows("FXBUTTON EFFECT INFO") / 2} FX presets · ${warnings.length} warning(s)`,
 	);
 	for (const warning of warnings) {
-		console.warn(`Warning: ${warning}`);
+		console.warn(`Warning: ${batch ? `[${path.basename(inputPath)}] ` : ""}${warning}`);
 	}
-	return 0;
+}
+
+/** Recursively collect .ksh/.kson files under a directory (hidden entries skipped). */
+function collectCharts(entry, out) {
+	const stat = fs.statSync(entry);
+	if (stat.isDirectory()) {
+		for (const name of fs.readdirSync(entry)) {
+			if (name.startsWith(".")) continue;
+			collectCharts(path.join(entry, name), out);
+		}
+	} else if (CHART_EXT.has(path.extname(entry).toLowerCase())) {
+		out.push(entry);
+	}
+	return out;
+}
+
+/** Deepest directory that contains every input file (input tree root). */
+function commonRoot(files) {
+	let root = path.dirname(files[0]);
+	for (const file of files.slice(1)) {
+		let dir = path.dirname(file);
+		for (;;) {
+			const rel = path.relative(root, dir);
+			if (rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel)) break;
+			if (root === path.dirname(root)) return root;
+			root = path.dirname(root);
+		}
+	}
+	return root;
+}
+
+/** Output path for one chart: beside the input, or mirrored under outDir. */
+function outputPathFor(file, root, outDir) {
+	const base = `${path.basename(file, path.extname(file))}.vox`;
+	if (!outDir) return path.join(path.dirname(file), base);
+	let rel = path.relative(root, path.dirname(file));
+	if (rel.startsWith("..") || path.isAbsolute(rel)) rel = "";
+	return path.join(outDir, rel, base);
+}
+
+/** Keep batch outputs from one run from overwriting each other. */
+function uniqueTarget(target, used, owner) {
+	const key = target.toLowerCase();
+	if (!used.has(key)) {
+		used.set(key, owner);
+		return [target, null];
+	}
+	const dir = path.dirname(target);
+	const base = path.basename(target, ".vox");
+	const claimedBy = used.get(key);
+	for (let n = 2; ; n++) {
+		const candidate = path.join(dir, `${base}_${n}.vox`);
+		if (!used.has(candidate.toLowerCase())) {
+			used.set(candidate.toLowerCase(), owner);
+			return [candidate, claimedBy];
+		}
+	}
+}
+
+async function main(argv) {
+	const inputs = [];
+	let outDir = null;
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i];
+		if (arg === "-o" || arg === "--out") {
+			outDir = argv[++i];
+			if (!outDir) {
+				console.error(`Missing directory after ${arg}`);
+				printUsage();
+				return 2;
+			}
+		} else if (arg === "--help" || arg === "-h") {
+			printUsage();
+			return 0;
+		} else if (arg.startsWith("-")) {
+			console.error(`Unknown option: ${arg}`);
+			printUsage();
+			return 2;
+		} else {
+			inputs.push(arg);
+		}
+	}
+	if (!inputs.length) {
+		printUsage();
+		return 2;
+	}
+
+	// Legacy single-file form: `<input> <output.vox>`.
+	if (
+		inputs.length === 2 && !outDir && /\.vox$/i.test(inputs[1]) &&
+		fs.existsSync(inputs[0]) && fs.statSync(inputs[0]).isFile()
+	) {
+		await convertOne(path.resolve(inputs[0]), path.resolve(inputs[1]));
+		return 0;
+	}
+
+	const files = [];
+	let missing = 0;
+	for (const entry of inputs) {
+		const resolved = path.resolve(entry);
+		if (!fs.existsSync(resolved)) {
+			console.error(`Input not found: ${entry}`);
+			missing++;
+			continue;
+		}
+		collectCharts(resolved, files);
+	}
+	if (outDir) outDir = path.resolve(outDir);
+	const unique = [...new Set(files.map((file) => path.resolve(file)))];
+	if (!unique.length) {
+		console.error("No .ksh/.kson charts found.");
+		return missing ? 1 : 2;
+	}
+
+	const root = commonRoot(unique);
+	const used = new Map();
+	let converted = 0;
+	let failed = missing;
+	for (const file of unique) {
+		const [output, collidedWith] = uniqueTarget(outputPathFor(file, root, outDir), used, path.basename(file));
+		if (collidedWith) {
+			console.log(`note: ${path.basename(file)} -> ${path.basename(output)} (name collision with ${collidedWith} output)`);
+		}
+		try {
+			await convertOne(file, output, { batch: true });
+			converted++;
+		} catch (error) {
+			console.error(`Failed ${file}: ${error.message}`);
+			failed++;
+		}
+	}
+	console.log(`Converted ${converted} chart(s), ${failed} failed.`);
+	return failed ? 1 : 0;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

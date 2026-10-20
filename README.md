@@ -17,10 +17,19 @@ node src\cli.js "C:\path\to\chart.kson"
 
 # explicit output path
 node src\cli.js "C:\path\to\chart.ksh" "C:\path\to\output.vox"
+
+# batch: several charts and/or whole directories (scanned recursively)
+node src\cli.js "C:\charts\a.ksh" "C:\charts\pack2"
+
+# batch into one output directory (input tree is mirrored underneath)
+node src\cli.js "C:\charts" -o "C:\vox-out"
 ```
 
-The default output is written beside the input as `chart.vox`. In VS Code,
-select **Run and Debug → Convert KSON to VOX** for the interactive prompt.
+By default each output is written beside its input as `chart.vox`; in batch
+mode one failing chart does not stop the rest, and same-name collisions
+(e.g. a folder shipping both `in.ksh` and `in.kson`) get a `_2` suffix with
+a note. In VS Code, select **Run and Debug → Convert KSON to VOX** for the
+interactive prompt.
 
 Diagnostics (camera approximations, native DSP fallbacks, dropped KSH lasers)
 are printed after the conversion summary line.
