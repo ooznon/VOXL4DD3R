@@ -1150,6 +1150,111 @@ function normalizeFxDefs(def) {
  * Convert a KSON chart object into VOX v13 text (sdvxindex dialect).
  * Returns the VOX file contents; diagnostics go to `warn`.
  */
+/**
+ * Reference module 32509 `G` — terminal-slam jump adaptation.
+ *
+ * When an isolated scroll jump sits exactly at the end of a laser section
+ * whose last point is a slam (`terminalSlam`), the native engine may hide the
+ * slam. The reference delays the jump ~0.1 seconds into the following empty
+ * interval: every step under the window adopts the prior graph speed, the
+ * delayed point carries the window's residual distance as a one-pulse speed,
+ * and the resume step keeps its original value there (so total scroll
+ * distance is recovered). All guards (range threshold, notes, stops, other
+ * jumps) mirror the reference byte-for-byte.
+ */
+function adaptTerminalJumps({ steps, graph, notes, stops, maxBpm, secondsAtPulse, maxPulse, format, warn }) {
+	const valueAtStep = (pulse) => {
+		let lo = 0;
+		let hi = steps.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >>> 1;
+			if (steps[mid].pulse <= pulse) lo = mid + 1;
+			else hi = mid;
+		}
+		const entry = steps[Math.max(0, lo - 1)];
+		return entry ? entry.value : 1;
+	};
+	const spanDistance = (from, to) => {
+		let sum = 0;
+		let cursor = from;
+		let value = valueAtStep(from);
+		for (const step of steps) {
+			if (step.pulse <= from) continue;
+			if (step.pulse >= to) break;
+			sum += (step.pulse - cursor) * value;
+			cursor = step.pulse;
+			value = step.value;
+		}
+		return sum + (to - cursor) * value;
+	};
+	const fr = Math.fround;
+	const terminalEnds = new Set(notes.filter((n) => n.terminalSlam).map((n) => n.end));
+	const graphAt = new Map(graph.map((p) => [p.pulse, p]));
+	// H6: (totalRangeUnits - behindUnits) * maxBpm / minEffectiveSpeed.
+	const range = ((3640 - 240) * maxBpm) / 100;
+	const delays = [];
+	const injected = new Map();
+	for (let i = 0; i + 1 < steps.length; i++) {
+		const step = steps[i];
+		const n = step.pulse;
+		const next = steps[i + 1];
+		if (!terminalEnds.has(n) || delays.some((d) => n < d.resumePulse)) continue;
+		const prior = graphAt.get(n)?.from;
+		if (!(prior > 0) || !(step.value > prior)) continue;
+		if (2 * (next.pulse - n) * (step.value - prior) <= range) continue;
+		// Smallest pulse more than ~0.1s after the jump (0.101s search seed).
+		const limit = fr(fr(secondsAtPulse(n)) + fr(0.1));
+		let low = n;
+		let high = Math.min(maxPulse, Math.max(n + 1, Math.ceil(n + ((240 * maxBpm) / 60) * 0.101)));
+		let y = high;
+		if (!(fr(secondsAtPulse(y)) > limit)) continue;
+		while (low + 1 < y) {
+			const mid = Math.floor((low + y) / 2);
+			if (fr(secondsAtPulse(mid)) > limit) y = mid;
+			else low = mid;
+		}
+		const x = y;
+		const w = x + 1;
+		if (w > maxPulse || next.pulse > x) continue;
+		if (2 * (x - n) * prior >= range) continue;
+		if (stops.some((s) => s.duration > 0 && s.pulse < w && s.pulse + s.duration > n)) continue;
+		if (notes.some((note) => (note.start > n && note.start <= w) || (note.start <= n && note.end > n))) continue;
+		if (steps.slice(i + 1).some((s, k) => {
+			if (s.pulse >= w) return false;
+			const stepNext = steps[i + k + 2];
+			const until = Math.min(w, stepNext ? stepNext.pulse : w);
+			return 2 * Math.abs(s.value - prior) * (until - s.pulse) > range;
+		})) continue;
+		const distance = spanDistance(n, w);
+		if (2 * distance <= range) continue;
+		const residual = distance - (x - n) * prior;
+		if (residual > 0 && Number.isFinite(residual)) {
+			delays.push({
+				sourcePulse: n,
+				delayedPulse: x,
+				resumePulse: w,
+				delaySeconds: secondsAtPulse(x) - secondsAtPulse(n),
+				priorSpeed: prior,
+				sourceSpeed: step.value,
+				delayedSpeed: residual,
+				sourceDistance: 2 * distance,
+			});
+			injected.set(x, residual);
+			injected.set(w, valueAtStep(w));
+		}
+	}
+	if (!delays.length) return steps;
+	for (const d of delays) {
+		warn(`An isolated scroll jump at ${format(d.sourcePulse)} was delayed ${(1e3 * d.delaySeconds).toFixed(2)}ms to ${format(d.delayedPulse)} within an empty interval so native terminal slams remain visible. Its distance is recovered by ${format(d.resumePulse)}; note times and the original source scroll graph are preserved.`);
+	}
+	const rebuilt = new Map(steps.map((step) => {
+		const d = delays.find((delay) => step.pulse >= delay.sourcePulse && step.pulse < delay.resumePulse);
+		return [step.pulse, d ? (step.pulse < d.delayedPulse ? d.priorSpeed : d.delayedSpeed) : step.value];
+	}));
+	injected.forEach((value, pulse) => rebuilt.set(pulse, value));
+	return [...rebuilt].sort((a, b) => a[0] - b[0]).map(([pulse, value]) => ({ pulse, value }));
+}
+
 export function convertKsonToVox(chart, warn = () => {}) {
 	requireObject(chart, "chart");
 	const meta = chart.meta ?? {};
@@ -1443,41 +1548,205 @@ export function convertKsonToVox(chart, warn = () => {}) {
 
 	const spRows = [...SP_HEADER_ROWS];
 
-	// ManualSpeed: per-pulse sampling of the scroll graph; stops are f0 blocks.
-	const scroll = flattenGraph(beat.scroll_speed, "beat.scroll_speed");
+	// Reference `y()`/`N()`: `lastPlayablePulse` = max BT/FX note end and
+	// "judged" laser section end. A section is judged when it contains a slam
+	// (before !== after) or when a beat-grid point (60 pulses, 120 at BPM
+	// >= 256) falls inside one of its segments. Laser tail sections beyond it
+	// are nonjudged decorative artwork; the reference project them into
+	// earlier gaps and clip the scroll/stop timeline at `x`, which is what
+	// fixes END POSITION and the ManualSpeed tail on real charts.
+	const lastPlayablePulse = (() => {
+		let x = 0;
+		for (const lane of laserSections) {
+			for (const section of lane) {
+				if (!Array.isArray(section) || !Array.isArray(section[1]) || !section[1].length) continue;
+				const start = Number(section[0]) || 0;
+				const graph = section[1].map((point) => ({
+					pulse: Number(point[0]) || 0,
+					before: Array.isArray(point[1]) ? point[1][0] : point[1],
+					after: Array.isArray(point[1]) ? point[1][1] : point[1],
+				}));
+				const end = start + graph[graph.length - 1].pulse;
+				let judged = graph.some((p) => p.before !== p.after);
+				if (!judged) {
+					judged = graph.some((p, index) => {
+						const next = graph[index + 1];
+						if (!next) return false;
+						const a = start + p.pulse;
+						const s = start + next.pulse;
+						let bpm = bpmTable[0]?.bpm ?? 120;
+						for (const entry of bpmTable) {
+							if (entry.pulse > a) break;
+							bpm = entry.bpm;
+						}
+						const grid = bpm >= 256 ? 120 : 60;
+						return Math.ceil(a / grid) * grid < s;
+					});
+				}
+				if (judged) x = Math.max(x, end);
+			}
+		}
+		for (const lane of [...btLanes, ...fxLanes]) {
+			for (const n of lane) x = Math.max(x, n.pulse + n.length);
+		}
+		return x;
+	})();
+	let decorationCount = 0;
+	if (lastPlayablePulse > 0) {
+		for (const lane of laserSections) {
+			for (const section of lane) {
+				const points = Array.isArray(section?.[1]) ? section[1] : [];
+				if (points.length && Number(section[0]) + Number(points[points.length - 1][0]) > lastPlayablePulse) decorationCount++;
+			}
+		}
+	}
+	if (decorationCount) {
+		warn(`${decorationCount} nonjudged decorative laser tail sections lie beyond the last playable pulse; scroll, stops and END POSITION were clipped there (the reference editor additionally relocates those sections into earlier gaps).`);
+	}
+
+	// ManualSpeed: reference step pulses `q` = scroll points + BPM positions +
+	// stop endpoints + every pulse where the scroll value changes; values are
+	// stop-masked, extreme jumps are fitted to the native float32 clock, and
+	// rows are deduped against the previous emitted value.
+	// Decorative tail: the reference clips the scroll graph at
+	// `lastPlayablePulse` (linear interpolation to the clip point) and drops
+	// stops starting at/after it.
+	const scroll = (() => {
+		const flat = flattenGraph(beat.scroll_speed ?? [[0, 1]], "beat.scroll_speed");
+		if (!decorationCount || !flat.length || flat.at(-1).pulse <= lastPlayablePulse) return flat;
+		const clipped = flat.filter((p) => p.pulse < lastPlayablePulse);
+		const index = flat.findLastIndex((p) => p.pulse <= lastPlayablePulse);
+		const cur = flat[index];
+		if (!cur) return flat;
+		const next = flat[index + 1];
+		if (cur.pulse === lastPlayablePulse) {
+			clipped.push(cur);
+		} else if (next) {
+			const ratio = (lastPlayablePulse - cur.pulse) / (next.pulse - cur.pulse);
+			const value = cur.to + (next.from - cur.to) * ratio; // reference interpolates linearly here
+			clipped.push({ pulse: lastPlayablePulse, from: value, to: value });
+		} else {
+			clipped.push({ pulse: lastPlayablePulse, from: cur.to, to: cur.to });
+		}
+		return clipped;
+	})();
 	const stops = (Array.isArray(beat.stop) ? beat.stop : []).map((entry) => ({
 		pulse: Math.max(0, Math.round(Number(entry[0]))),
 		duration: Math.max(0, Math.round(Number(entry[1]))),
-	})).sort((a, b) => a.pulse - b.pulse);
-	// Last pulse of the scroll/stop timeline (END POSITION counts it).
+	})).sort((a, b) => a.pulse - b.pulse)
+		.filter((s) => !decorationCount || s.pulse < lastPlayablePulse);
+	// Last pulse of the step timeline (END POSITION counts it).
 	let scrollEndPulse = 0;
 	if (scroll.length || stops.length) {
 		const scrollAt = makeGraph(scroll);
-		const stopEnds = stops.map((s) => s.pulse + s.duration);
-		const maxP = Math.max(
-			0,
-			...scroll.map((p) => p.pulse),
-			...stopEnds,
-		);
-		scrollEndPulse = maxP;
+		// Reference `C(bpmTable)`: the pure-BPM seconds clock.
+		const marks = [];
+		let seconds = 0;
+		for (const entry of bpmTable) {
+			const prev = marks.at(-1);
+			if (prev) seconds += (60 * (entry.pulse - prev.pulse)) / (prev.bpm * VOX_RESOLUTION);
+			marks.push({ pulse: entry.pulse, bpm: entry.bpm, seconds });
+		}
+		const secondsAtPulse = (pulse) => {
+			let i = marks.length - 1;
+			while (i > 0 && marks[i].pulse > pulse) i--;
+			const mark = marks[i] ?? { pulse: 0, bpm: 120, seconds: 0 };
+			return mark.seconds + (60 * (pulse - mark.pulse)) / (mark.bpm * VOX_RESOLUTION);
+		};
+		// Reference float-clock fit: extreme ManualSpeed jumps are nudged to a
+		// float32 neighbor so `8 * seconds * bpm * value` tracks the linear
+		// distance `2 * deltaPulse * value` within 0.25 pulses.
+		let fitWarned = false;
+		const fitSpeedValue = (value, pulse, nextPulse, bpm) => {
+			if (!value || nextPulse === undefined || nextPulse <= pulse) return value;
+			const fr = Math.fround;
+			const a = fr(fr(secondsAtPulse(nextPulse)) - fr(secondsAtPulse(pulse)));
+			const s = fr(bpm);
+			const linear = 2 * (nextPulse - pulse) * value;
+			const clock = (candidate) => fr(8 * fr(a * fr(s * fr(candidate))));
+			const err = Math.abs(clock(value) - linear);
+			if (!(a > 0) || !Number.isFinite(linear) || err <= 0.25) return value;
+			const start = fr(linear / (a * s * 8));
+			if (!Number.isFinite(start)) return value;
+			const buf = new DataView(new ArrayBuffer(4));
+			buf.setFloat32(0, start, true);
+			const bits = buf.getUint32(0, true);
+			let best = value;
+			let bestErr = err;
+			for (const neighbor of [bits, bits - 1, bits + 1]) {
+				buf.setUint32(0, neighbor, true);
+				const candidate = buf.getFloat32(0, true);
+				if (!Number.isFinite(candidate)) continue;
+				const candidateErr = Math.abs(clock(candidate) - linear);
+				if (candidateErr < bestErr) {
+					best = candidate;
+					bestErr = candidateErr;
+				}
+			}
+			if (best !== value && !fitWarned) {
+				fitWarned = true;
+				warn("Extreme KSON scroll distances were fitted to the native float clock to keep short forward/reverse jumps aligned; original scroll values are preserved in the source archive.");
+			}
+			return best;
+		};
+		const stepPulses = new Set([0]);
+		for (const entry of bpmTable) stepPulses.add(entry.pulse);
+		for (const p of scroll) stepPulses.add(p.pulse);
+		for (const s of stops) {
+			stepPulses.add(s.pulse);
+			stepPulses.add(s.pulse + s.duration);
+		}
+		for (let i = 0; i + 1 < scroll.length; i++) {
+			if (scroll[i].to !== scroll[i + 1].from) {
+				for (let p = scroll[i].pulse + 1; p < scroll[i + 1].pulse; p++) stepPulses.add(p);
+			}
+		}
+		const baseSteps = [...stepPulses].sort((a, b) => a - b).map((pulse) => ({
+			pulse,
+			value: stops.some((s) => pulse >= s.pulse && pulse < s.pulse + s.duration) ? 0 : scrollAt(pulse),
+		}));
+		// Reference `d.G`: delay isolated terminal-slam jumps into the
+		// following empty interval (see adaptTerminalJumps).
+		const jumpNotes = [
+			...btLanes.flat().map((n) => ({ start: n.pulse, end: n.pulse + n.length })),
+			...fxLanes.flat().map((n) => ({ start: n.pulse, end: n.pulse + n.length })),
+			...laserSections.flat().flatMap((section) => {
+				const points = Array.isArray(section?.[1]) ? section[1] : [];
+				const lastPoint = points.at(-1);
+				if (!lastPoint) return [];
+				const from = Array.isArray(lastPoint[1]) ? lastPoint[1][0] : lastPoint[1];
+				const to = Array.isArray(lastPoint[1]) ? lastPoint[1][1] : lastPoint[1];
+				return [{
+					start: Number(section[0]) || 0,
+					end: (Number(section[0]) || 0) + (Number(lastPoint[0]) || 0),
+					terminalSlam: from !== to,
+				}];
+			}),
+		];
+		const steps = adaptTerminalJumps({
+			steps: baseSteps,
+			graph: scroll,
+			notes: jumpNotes,
+			stops,
+			maxBpm: Math.max(...bpmTable.map((entry) => entry.bpm)),
+			secondsAtPulse,
+			maxPulse: 9600000, // reference `A` = 960 * 1e4
+			format: (pulse) => timeline.format(pulse),
+			warn,
+		});
+		scrollEndPulse = steps.length ? steps[steps.length - 1].pulse : 0;
 		// The VOX default speed is 1.0, so the reference omits the redundant
 		// initial row when the chart starts at the default.
-		let last = "1";
-		const emitSpeed = (pulse, value) => {
-			const text = formatSpeedValue(value);
-			if (text === last) return;
-			spRows.push(`${timeline.format(pulse)}\tManualSpeed\t0\t0\tf${text}\t0\t0\t0`);
-			last = text;
-		};
-		for (let p = 0; p <= maxP; p++) {
-			const stop = stops.find((s) => p >= s.pulse && p < s.pulse + s.duration);
-			if (stop) {
-				emitSpeed(p, 0);
-				continue;
+		let last = 1;
+		let bpmIndex = 0;
+		for (let i = 0; i < steps.length; i++) {
+			const { pulse, value } = steps[i];
+			while (bpmIndex + 1 < bpmTable.length && bpmTable[bpmIndex + 1].pulse <= pulse) bpmIndex++;
+			const fitted = fitSpeedValue(value, pulse, steps[i + 1]?.pulse, bpmTable[bpmIndex]?.bpm ?? 120);
+			if (fitted !== last) {
+				spRows.push(`${timeline.format(pulse)}\tManualSpeed\t0\t0\tf${formatSpeedValue(fitted)}\t0\t0\t0`);
+				last = fitted;
 			}
-			// Reference samples the graph per pulse (after-side at instant
-			// steps: the step takes effect at its own pulse) with value dedup.
-			emitSpeed(p, scrollAt(p));
 		}
 	}
 
@@ -1633,7 +1902,9 @@ export function convertKsonToVox(chart, warn = () => {}) {
 	const endPulse = Math.max(
 		...btLanes.flat().map((n) => n.pulse + n.length),
 		...fxLanes.flat().map((n) => n.pulse + n.length),
-		laserEndPulse,
+		// Decorative tail lasers are relocated to/kept within `x` by the
+		// reference projection, so their END contribution stops at `x`.
+		decorationCount ? Math.min(laserEndPulse, lastPlayablePulse) : laserEndPulse,
 		scrollEndPulse,
 		...stops.map((s) => s.pulse + s.duration),
 		...zoomTop.map((p) => p.pulse),

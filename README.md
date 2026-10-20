@@ -50,7 +50,9 @@ KSON data in VOX* option off.
   `LYRIC INFO`, `REVERB EFFECT PARAM`, `TRACK AUTO TAB`, `TRACK ORIGINAL L/R`,
   including the reference's extra blank line after `SPCONTROLER`.
 - Positions as `MMM,BB,TT`; `END POSITION` on the measure boundary after the
-  last note/camera/scroll pulse.
+  last playable pulse — max BT/FX end, *judged* laser end (slam or on-grid
+  point; nonjudged decorative tail sections are excluded) and the scroll
+  timeline clipped at that pulse (reference `lastPlayablePulse` rule).
 
 ### Notes and effects
 
@@ -98,8 +100,12 @@ KSON data in VOX* option off.
 - Slam spin patterns are fit to the native duration/type grid (reference spin
   fit, RMS over the critical sample set) and stamped on the laser rows with
   `// KSON camera.cam.pattern.laser.slam_event.*` comments.
-- Manual speed steps, ramps, stops and tilt rows are sampled exactly as the
-  reference writer does (after-side sampling at instant steps, value dedup).
+- Manual speed uses the reference step set (scroll points, BPM positions,
+  stop endpoints, per-pulse fill where values change) with stop masking,
+  value dedup, the float32-clock fit for extreme jumps, and the reference
+  terminal-slam jump delay (`d.G`): an isolated slam at a laser section's
+  terminal slam is moved ~0.1 s into the following empty interval and its
+  distance recovered at the resume step. Tilt rows follow the reference too.
 - Time signatures, BPM changes, and `END POSITION` follow the KSON timeline.
 
 ### KSH input (`src/ksh-parser.js`)
@@ -143,7 +149,15 @@ node --test
 - Effect algorithms are the native VOX DSP: phaser and sidechain have no
   verified parameter mapping (the KSON definition is preserved), tape stop and
   KSM wobble approximate their KSON shapes.
-- KSH laser audio effects are not yet written to `TAB EFFECT INFO`.
+- Nonjudged decorative laser tail sections (beyond the last playable pulse)
+  are kept at their source timing while the reference *relocates* them into
+  earlier gaps; the scroll/stop/`END POSITION` clip already matches.
+- Laser rows keep the reference's key-point structure, but per-control-pulse
+  interpolation rows and the per-pulse effect-index column are not yet
+  replicated (the reference samples laser audio-effect curves into both).
+- Laser audio effects are not yet written to `TAB EFFECT INFO`,
+  `TAB PARAM ASSIGN INFO` or `TRACK AUTO TAB`, and their FX presets are not
+  expanded into `FXBUTTON EFFECT INFO`.
 - UTF-8 KSH files require a BOM.
 
 ## Reference material

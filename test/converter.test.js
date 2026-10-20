@@ -171,6 +171,37 @@ test("stops become ManualSpeed f0 blocks that resume at the graph value", () => 
 	assert.equal(sp[stopRow + 1], "001,03,120\tManualSpeed\t0\t0\tf1.625\t0\t0\t0");
 });
 
+test("decorative laser tail sections clip scroll, stops and END POSITION at the last playable pulse", () => {
+	// BT ends at pulse 480 (last playable); the single-point non-slam laser
+	// section at 1200 is nonjudged decoration. Per the reference, the scroll
+	// graph is clipped at 480 (linear interpolation), stops at/after 480 are
+	// dropped, and END POSITION stops following the tail.
+	const warnings = [];
+	const vox = convertKsonToVox({
+		meta: {},
+		beat: {
+			bpm: [[0, 120]],
+			time_sig: [[0, [4, 4]]],
+			scroll_speed: [[0, 1], [240, [1, 4]], [960, [4, 2]]],
+			stop: [[720, 120]],
+		},
+		note: {
+			bt: [[[0, 480]], [], [], []],
+			fx: [[], []],
+			laser: [[[1200, [[0, [1, 1]]]]], []],
+		},
+	}, message => warnings.push(message));
+	assert.deepEqual(section(vox, "END POSITION"), ["002,01,00"]);
+	// Only the slam at 240 is emitted; the 480 clip point stays at the same
+	// value (deduped) and the 960 slam is clipped away.
+	const speed = section(vox, "SPCONTROLER").filter(r => r.includes("ManualSpeed"));
+	assert.deepEqual(speed.map(r => r.split("\t")[0]), ["001,02,00"]);
+	assert.ok(speed[0].includes("\tf4\t"));
+	// The dropped 720 stop leaves no f0 block behind.
+	assert.ok(!section(vox, "SPCONTROLER").some(r => r.includes("\tf0\t")));
+	assert.ok(warnings.some(w => w.includes("decorative")));
+});
+
 // ---------------------------------------------------------------------------
 // FX / BT notes
 // ---------------------------------------------------------------------------
