@@ -152,12 +152,9 @@ node --test
 - Nonjudged decorative laser tail sections (beyond the last playable pulse)
   are kept at their source timing while the reference *relocates* them into
   earlier gaps; the scroll/stop/`END POSITION` clip already matches.
-- Laser rows keep the reference's key-point structure, but per-control-pulse
-  interpolation rows and the per-pulse effect-index column are not yet
-  replicated (the reference samples laser audio-effect curves into both).
-- Laser audio effects are not yet written to `TAB EFFECT INFO`,
-  `TAB PARAM ASSIGN INFO` or `TRACK AUTO TAB`, and their FX presets are not
-  expanded into `FXBUTTON EFFECT INFO`.
+- Laser flanger automation (`H`/`M` KSON effects) is not ported; other laser
+  audio effects (retrigger, gate, wobble, switch) drive `TAB EFFECT INFO` and
+  the per-row filter index exactly like the reference.
 - UTF-8 KSH files require a BOM.
 
 ## Reference material
