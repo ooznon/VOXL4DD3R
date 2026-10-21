@@ -7,12 +7,16 @@ function printUsage() {
 	console.error([
 		"Usage:",
 		"  node src/cli.js <input.ksh|input.kson> [output.vox]",
-		"  node src/cli.js <file|dir>... [-o <outputDir>]",
+		"  node src/cli.js <file|dir>... [-o <outputDir>] [--speed-cap <n|none>] [--max-speed <n>]",
 		"",
 		"Batch mode converts every .ksh/.kson chart given; directory arguments",
 		"are scanned recursively. Outputs are written beside each input, or",
 		"mirrored under <outputDir> when -o/--out is passed. One failing chart",
-		"does not stop the rest of the batch.",
+		"does not stop the rest of the batch. --speed-cap overrides the ±10000",
+		"lane-speed magnitude cap (default 10000; 'none' emits raw values).",
+		"--max-speed clamps the chart's own scroll_speed values (KSON/KSH speed",
+		"units, 1 = normal speed) to ±n before conversion, so speed ramps run",
+		"down to the limit; emitted ManualSpeed never exceeds either cap.",
 	].join("\n"));
 }
 
@@ -35,10 +39,10 @@ async function loadChart(inputPath) {
 }
 
 /** Convert one chart and write the .vox; prints its own summary + warnings. */
-async function convertOne(inputPath, outputPath, { batch = false } = {}) {
+async function convertOne(inputPath, outputPath, { batch = false, convertOptions = {} } = {}) {
 	const { chart, warnings: parseWarnings } = await loadChart(inputPath);
 	const converterWarnings = [];
-	const vox = convertKsonToVox(chart, (message) => converterWarnings.push(message));
+	const vox = convertKsonToVox(chart, (message) => converterWarnings.push(message), convertOptions);
 	fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 	fs.writeFileSync(outputPath, Buffer.from(vox, "ascii"));
 
@@ -119,6 +123,7 @@ function uniqueTarget(target, used, owner) {
 async function main(argv) {
 	const inputs = [];
 	let outDir = null;
+	const convertOptions = {};
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "-o" || arg === "--out") {
@@ -128,6 +133,36 @@ async function main(argv) {
 				printUsage();
 				return 2;
 			}
+		} else if (arg === "--speed-cap") {
+			const raw = argv[++i];
+			if (raw == null) {
+				console.error(`Missing value after ${arg}`);
+				printUsage();
+				return 2;
+			}
+			if (raw === "none") {
+				convertOptions.speedCap = Infinity;
+			} else {
+				const value = Number(raw);
+				if (!Number.isFinite(value) || value <= 0) {
+					console.error(`Invalid speed cap: ${raw} (expected positive number or 'none')`);
+					return 2;
+				}
+				convertOptions.speedCap = value;
+			}
+		} else if (arg === "--max-speed") {
+			const raw = argv[++i];
+			if (raw == null) {
+				console.error(`Missing value after ${arg}`);
+				printUsage();
+				return 2;
+			}
+			const value = Number(raw);
+			if (!Number.isFinite(value) || value <= 0) {
+				console.error(`Invalid max speed: ${raw} (expected positive number in KSON/KSH speed units, 1 = normal speed)`);
+				return 2;
+			}
+			convertOptions.maxSpeed = value;
 		} else if (arg === "--help" || arg === "-h") {
 			printUsage();
 			return 0;
@@ -149,7 +184,7 @@ async function main(argv) {
 		inputs.length === 2 && !outDir && /\.vox$/i.test(inputs[1]) &&
 		fs.existsSync(inputs[0]) && fs.statSync(inputs[0]).isFile()
 	) {
-		await convertOne(path.resolve(inputs[0]), path.resolve(inputs[1]));
+		await convertOne(path.resolve(inputs[0]), path.resolve(inputs[1]), { convertOptions });
 		return 0;
 	}
 
@@ -181,7 +216,7 @@ async function main(argv) {
 			console.log(`note: ${path.basename(file)} -> ${path.basename(output)} (name collision with ${collidedWith} output)`);
 		}
 		try {
-			await convertOne(file, output, { batch: true });
+			await convertOne(file, output, { batch: true, convertOptions });
 			converted++;
 		} catch (error) {
 			console.error(`Failed ${file}: ${error.message}`);

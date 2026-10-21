@@ -23,6 +23,9 @@ node src\cli.js "C:\charts\a.ksh" "C:\charts\pack2"
 
 # batch into one output directory (input tree is mirrored underneath)
 node src\cli.js "C:\charts" -o "C:\vox-out"
+
+# clamp chart speeds (KSON/KSH units, 1 = normal speed) that make the game lag
+node src\cli.js "C:\charts" --max-speed 7306
 ```
 
 By default each output is written beside its input as `chart.vox`; in batch
@@ -30,6 +33,13 @@ mode one failing chart does not stop the rest, and same-name collisions
 (e.g. a folder shipping both `in.ksh` and `in.kson`) get a `_2` suffix with
 a note. In VS Code, select **Run and Debug → Convert KSON to VOX** for the
 interactive prompt.
+
+Two speed limits are available: `--max-speed <n>` clamps each chart's own
+`scroll_speed` values (KSON/KSH speed units, 1 = normal speed) *before*
+conversion, so speed ramps run down to the limit — use it when charts
+beyond a certain scroll speed stutter or drop notes in game (official charts
+stay within ±7306); `--speed-cap <n|none>` bounds the emitted `ManualSpeed`
+rows only (default ±10000). When both are set, output never exceeds either.
 
 Diagnostics (camera approximations, native DSP fallbacks, dropped KSH lasers)
 are printed after the conversion summary line.

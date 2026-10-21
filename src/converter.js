@@ -1291,7 +1291,7 @@ function adaptTerminalJumps({ steps, graph, notes, stops, maxBpm, secondsAtPulse
 	return [...rebuilt].sort((a, b) => a[0] - b[0]).map(([pulse, value]) => ({ pulse, value }));
 }
 
-export function convertKsonToVox(chart, warn = () => {}) {
+export function convertKsonToVox(chart, warn = () => {}, options = {}) {
 	requireObject(chart, "chart");
 	// Reference import order (f_000011 `ie`): decorative tail-laser projection
 	// (module 78799) rewrites laser sections BEFORE anything else reads them.
@@ -1692,7 +1692,22 @@ export function convertKsonToVox(chart, warn = () => {}) {
 	// stop endpoints + every pulse where the scroll value changes; values are
 	// stop-masked, extreme jumps are fitted to the native float32 clock, and
 	// rows are deduped against the previous emitted value.
-	const scroll = flattenGraph(beat.scroll_speed ?? [[0, 1]], "beat.scroll_speed");
+	// options.maxSpeed clamps the chart's own scroll_speed values (KSON/KSH
+	// speed units, 1 = normal speed) on the graph itself, before the step
+	// timeline is built: ramps then run down to the limit from a chart-unit
+	// value instead of riding the (much higher) default ±10000 output cap as
+	// a clipped plateau. When both are set, the emitted magnitude never
+	// exceeds either limit.
+	const maxSpeed = Number.isFinite(options.maxSpeed) && options.maxSpeed > 0 ? options.maxSpeed : Infinity;
+	let clampedSpeedPoints = 0;
+	const scroll = flattenGraph(beat.scroll_speed ?? [[0, 1]], "beat.scroll_speed", (v) => {
+		if (v > maxSpeed) { clampedSpeedPoints += 1; return maxSpeed; }
+		if (v < -maxSpeed) { clampedSpeedPoints += 1; return -maxSpeed; }
+		return v;
+	});
+	if (clampedSpeedPoints) {
+		warn(`Chart scroll_speed exceeded ±${maxSpeed} (chart speed units, 1 = normal) at ${clampedSpeedPoints} graph point(s) and was clamped to the max speed.`);
+	}
 	const stops = (Array.isArray(beat.stop) ? beat.stop : []).map((entry) => ({
 		pulse: Math.max(0, Math.round(Number(entry[0]))),
 		duration: Math.max(0, Math.round(Number(entry[1]))),
@@ -1814,7 +1829,11 @@ export function convertKsonToVox(chart, warn = () => {}) {
 		// value and the float-clock-fitted result (the fit otherwise nudges
 		// the capped value back above the limit: its float32 absolute-seconds
 		// clock deviates from the linear distance on long spans).
-		const MAX_LANE_SPEED = 10000;
+		// options.speedCap overrides the limit (Infinity = emit raw values);
+		// options.maxSpeed — already applied to the graph — also bounds the
+		// emitted rows here, because the float-clock fit can nudge a clamped
+		// value a hair above the chart-unit limit on long spans.
+		const MAX_LANE_SPEED = Math.min(options.speedCap ?? 10000, maxSpeed);
 		const capSpeed = (v) => (v > MAX_LANE_SPEED ? MAX_LANE_SPEED : (v < -MAX_LANE_SPEED ? -MAX_LANE_SPEED : v));
 		let last = 1;
 		let bpmIndex = 0;

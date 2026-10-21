@@ -247,6 +247,40 @@ test("ManualSpeed output magnitude is capped at 10000", () => {
 	assert.deepEqual(over, [], "no ManualSpeed exceeds the ±10000 cap");
 });
 
+test("--max-speed clamps chart-unit scroll_speed before the step timeline", () => {
+	// maxSpeed is expressed in the chart's own speed units (KSON scroll_speed
+	// / KSH scroll_speed=, 1 = normal speed): the graph itself is clamped, so
+	// the post-spike ramp starts at the limit — unlike speedCap, which only
+	// clips the emitted rows against the default ±10000 output cap.
+	const spikeChart = {
+		meta: {},
+		beat: {
+			bpm: [[0, 185]],
+			time_sig: [[0, [4, 4]]],
+			scroll_speed: [[0, 1], [960, [1, 1000000]], [1920, 1]],
+		},
+		note: { bt: [[[0, 3840]]], fx: [[], []], laser: [[], []] },
+	};
+	const speedValues = (options) => {
+		const warnings = [];
+		const vox = convertKsonToVox(spikeChart, (message) => warnings.push(message), options);
+		return {
+			warnings,
+			values: section(vox, "SPCONTROLER").filter(r => r.includes("ManualSpeed"))
+				.map(r => Number(r.split("\t")[4].slice(1))),
+		};
+	};
+
+	const capped = speedValues({ maxSpeed: 5000 });
+	assert.deepEqual(capped.values.filter(v => Math.abs(v) > 5000), [], "no ManualSpeed exceeds the chart-unit max speed");
+	assert.ok(capped.values.includes(5000), "the ramp starts at the clamped chart-unit value");
+	assert.ok(capped.warnings.some(w => w.includes("clamped to the max speed")), `clamping is reported: ${capped.warnings}`);
+
+	// When both caps are set, the emitted magnitude never exceeds either one.
+	const tight = speedValues({ maxSpeed: 5000, speedCap: 2000 });
+	assert.deepEqual(tight.values.filter(v => Math.abs(v) > 2000), [], "the tighter of the two caps wins");
+});
+
 // ---------------------------------------------------------------------------
 // FX / BT notes
 // ---------------------------------------------------------------------------

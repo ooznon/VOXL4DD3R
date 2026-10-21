@@ -107,3 +107,31 @@ test("same-name charts in one folder get a _2 suffix and a collision note", asyn
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("--max-speed clamps chart-unit speeds and rejects bad values", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "voxl4dd3r-"));
+	try {
+		const spiky = {
+			...chart,
+			beat: { bpm: [[0, 120]], time_sig: [[0, [4, 4]]], scroll_speed: [[0, 1], [960, [1, 7000]], [1920, 1]] },
+		};
+		const input = path.join(dir, "spike.kson");
+		fs.writeFileSync(input, JSON.stringify(spiky));
+		const { stderr } = await run(process.execPath, [cli, input, "--max-speed", "3000"]);
+		assert.ok(stderr.includes("clamped to the max speed"), stderr);
+		const vox = fs.readFileSync(path.join(dir, "spike.vox"), "ascii");
+		const values = vox.split(/\r?\n/).filter(r => r.includes("ManualSpeed"))
+			.map(r => Number(r.split("\t")[4].slice(1)));
+		assert.ok(values.includes(3000), `the clamped value is emitted: ${values}`);
+		assert.deepEqual(values.filter(v => Math.abs(v) > 3000), [], "no ManualSpeed exceeds --max-speed");
+
+		const bad = await run(process.execPath, [cli, input, "--max-speed", "0"]).then(
+			() => assert.fail("expected a nonzero exit"),
+			(e) => e,
+		);
+		assert.equal(bad.code, 2);
+		assert.ok(bad.stderr.includes("Invalid max speed"), bad.stderr);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
