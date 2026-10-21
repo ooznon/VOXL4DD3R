@@ -1683,93 +1683,20 @@ export function convertKsonToVox(chart, warn = () => {}) {
 
 	const spRows = [...SP_HEADER_ROWS];
 
-	// Reference `y()`/`N()`: `lastPlayablePulse` = max BT/FX note end and
-	// "judged" laser section end. A section is judged when it contains a slam
-	// (before !== after) or when a beat-grid point (60 pulses, 120 at BPM
-	// >= 256) falls inside one of its segments. Laser tail sections beyond it
-	// are nonjudged decorative artwork; the reference project them into
-	// earlier gaps and clip the scroll/stop timeline at `x`, which is what
-	// fixes END POSITION and the ManualSpeed tail on real charts.
-	const lastPlayablePulse = (() => {
-		let x = 0;
-		for (const lane of laserSections) {
-			for (const section of lane) {
-				if (!Array.isArray(section) || !Array.isArray(section[1]) || !section[1].length) continue;
-				const start = Number(section[0]) || 0;
-				const graph = section[1].map((point) => ({
-					pulse: Number(point[0]) || 0,
-					before: Array.isArray(point[1]) ? point[1][0] : point[1],
-					after: Array.isArray(point[1]) ? point[1][1] : point[1],
-				}));
-				const end = start + graph[graph.length - 1].pulse;
-				let judged = graph.some((p) => p.before !== p.after);
-				if (!judged) {
-					judged = graph.some((p, index) => {
-						const next = graph[index + 1];
-						if (!next) return false;
-						const a = start + p.pulse;
-						const s = start + next.pulse;
-						let bpm = bpmTable[0]?.bpm ?? 120;
-						for (const entry of bpmTable) {
-							if (entry.pulse > a) break;
-							bpm = entry.bpm;
-						}
-						const grid = bpm >= 256 ? 120 : 60;
-						return Math.ceil(a / grid) * grid < s;
-					});
-				}
-				if (judged) x = Math.max(x, end);
-			}
-		}
-		for (const lane of [...btLanes, ...fxLanes]) {
-			for (const n of lane) x = Math.max(x, n.pulse + n.length);
-		}
-		return x;
-	})();
-	let decorationCount = 0;
-	if (lastPlayablePulse > 0) {
-		for (const lane of laserSections) {
-			for (const section of lane) {
-				const points = Array.isArray(section?.[1]) ? section[1] : [];
-				if (points.length && Number(section[0]) + Number(points[points.length - 1][0]) > lastPlayablePulse) decorationCount++;
-			}
-		}
-	}
-	if (decorationCount) {
-		warn(`${decorationCount} nonjudged decorative laser tail sections lie beyond the last playable pulse; scroll, stops and END POSITION were clipped there (the reference editor additionally relocates those sections into earlier gaps).`);
-	}
+	// Decorative tail laser relocation (reference import step, ported in
+	// tail-projection.js) already truncated scroll_speed/stop at
+	// `lastPlayablePulse` when every tail section projected; the writers keep
+	// whatever the projection left, exactly like reference writer `F`.
 
 	// ManualSpeed: reference step pulses `q` = scroll points + BPM positions +
 	// stop endpoints + every pulse where the scroll value changes; values are
 	// stop-masked, extreme jumps are fitted to the native float32 clock, and
 	// rows are deduped against the previous emitted value.
-	// Decorative tail: the reference clips the scroll graph at
-	// `lastPlayablePulse` (linear interpolation to the clip point) and drops
-	// stops starting at/after it.
-	const scroll = (() => {
-		const flat = flattenGraph(beat.scroll_speed ?? [[0, 1]], "beat.scroll_speed");
-		if (!decorationCount || !flat.length || flat.at(-1).pulse <= lastPlayablePulse) return flat;
-		const clipped = flat.filter((p) => p.pulse < lastPlayablePulse);
-		const index = flat.findLastIndex((p) => p.pulse <= lastPlayablePulse);
-		const cur = flat[index];
-		if (!cur) return flat;
-		const next = flat[index + 1];
-		if (cur.pulse === lastPlayablePulse) {
-			clipped.push(cur);
-		} else if (next) {
-			const ratio = (lastPlayablePulse - cur.pulse) / (next.pulse - cur.pulse);
-			const value = cur.to + (next.from - cur.to) * ratio; // reference interpolates linearly here
-			clipped.push({ pulse: lastPlayablePulse, from: value, to: value });
-		} else {
-			clipped.push({ pulse: lastPlayablePulse, from: cur.to, to: cur.to });
-		}
-		return clipped;
-	})();
+	const scroll = flattenGraph(beat.scroll_speed ?? [[0, 1]], "beat.scroll_speed");
 	const stops = (Array.isArray(beat.stop) ? beat.stop : []).map((entry) => ({
 		pulse: Math.max(0, Math.round(Number(entry[0]))),
 		duration: Math.max(0, Math.round(Number(entry[1]))),
-	})).sort((a, b) => a.pulse - b.pulse)
-		.filter((s) => !decorationCount || s.pulse < lastPlayablePulse);
+	})).sort((a, b) => a.pulse - b.pulse);
 	// Last pulse of the step timeline (END POSITION counts it).
 	let scrollEndPulse = 0;
 	if (scroll.length || stops.length) {
@@ -1831,26 +1758,18 @@ export function convertKsonToVox(chart, warn = () => {}) {
 			stepPulses.add(s.pulse);
 			stepPulses.add(s.pulse + s.duration);
 		}
+		// Reference: every pulse of a changing span (after_i !== before_{i+1},
+		// curves included) becomes a step because native ManualSpeed is a
+		// step command; the editor's import guards are mirrored exactly.
+		const STEP_LIMIT = 100000;
 		for (let i = 0; i + 1 < scroll.length; i++) {
 			if (scroll[i].to !== scroll[i + 1].from) {
 				const start = scroll[i].pulse;
 				const end = scroll[i + 1].pulse;
-				if (parseCurvePair(scroll[i].curve)) {
-					// Curved ramps are subsampled: a step is kept whenever the
-					// curve drifts max(0.005, 0.5% of the value) away from the
-					// last kept step, bounding the piecewise-constant error
-					// while avoiding 240 rows per beat on long smooth curves.
-					// (Linear ramps stay per-pulse, matching the reference.)
-					let kept = scrollAt(start);
-					for (let p = start + 1; p < end; p++) {
-						const value = scrollAt(p);
-						if (Math.abs(value - kept) >= Math.max(0.005, Math.abs(value) * 0.005)) {
-							stepPulses.add(p);
-							kept = value;
-						}
-					}
-				} else {
-					for (let p = start + 1; p < end; p++) stepPulses.add(p);
+				if (end - start > STEP_LIMIT) throw new Error("The scroll graph exceeds the preview import limit.");
+				for (let p = start + 1; p < end; p++) {
+					stepPulses.add(p);
+					if (stepPulses.size > STEP_LIMIT) throw new Error("The scroll graph exceeds the 100,000-point import limit.");
 				}
 			}
 		}
@@ -2063,9 +1982,9 @@ export function convertKsonToVox(chart, warn = () => {}) {
 	const endPulse = Math.max(
 		...btLanes.flat().map((n) => n.pulse + n.length),
 		...fxLanes.flat().map((n) => n.pulse + n.length),
-		// Decorative tail lasers are relocated to/kept within `x` by the
-		// reference projection, so their END contribution stops at `x`.
-		decorationCount ? Math.min(laserEndPulse, lastPlayablePulse) : laserEndPulse,
+		// Reference `U`: relocated tail rows land inside `x`; unprojected tail
+		// rows stay and extend END exactly like the editor keeps them.
+		laserEndPulse,
 		scrollEndPulse,
 		...stops.map((s) => s.pulse + s.duration),
 		...zoomTop.map((p) => p.pulse),

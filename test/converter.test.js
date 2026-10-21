@@ -151,11 +151,12 @@ test("ManualSpeed omits the redundant default row and writes only the speed step
 	assert.ok(sp[1].includes("AIRR_ScaX"));
 });
 
-test("continuous speed ramps keep linear regions per-pulse and subsample curved ones", () => {
+test("changing speed ramps are sampled at every pulse, curves included", () => {
 	const sp = section(convertKsonToVox(readFixture("speed-curve.kson")), "SPCONTROLER");
 	const speed = sp.filter(r => r.includes("ManualSpeed"));
-	// Linear ramp (pulses 1..959) stays sampled per pulse with full float
-	// precision; the curved ramp (960..1920) is subsampled to cut row count.
+	// Reference: native ManualSpeed is a step command, so every pulse of a
+	// changing span (after_i !== before_{i+1}) becomes a row — linear AND
+	// curved ramps alike; values are the exact curve evaluations.
 	assert.equal(speed[0].split("\t")[0], "001,01,01");
 	assert.ok(speed[0].includes("f1.0005208333333333"), "full float precision is retained");
 	const pulseOf = row => {
@@ -164,11 +165,11 @@ test("continuous speed ramps keep linear regions per-pulse and subsample curved 
 	};
 	const linearRows = speed.filter(r => pulseOf(r) < 960);
 	const curvedRows = speed.filter(r => pulseOf(r) >= 960);
-	assert.equal(linearRows.length, 959, "the linear ramp is still sampled per pulse");
-	assert.ok(curvedRows.length < 400, `the curved ramp is subsampled (got ${curvedRows.length} rows)`);
+	assert.equal(linearRows.length, 959, "the linear ramp is sampled per pulse");
+	assert.equal(curvedRows.length, 961, "the curved ramp is sampled per pulse too");
 	assert.ok(speed.at(-1).split("\t")[0] === "003,01,00" && speed.at(-1).includes("f0.5"), "the ramp still ends exactly on the graph's last point");
-	// The value held between rows must never drift from the true bezier ramp
-	// (1.5 -> 0.5, controls [0.2, 0.8]) by more than max(0.005, 0.5%).
+	// Every pulse's held value equals the true bezier ramp value exactly
+	// (1.5 -> 0.5, controls [0.2, 0.8]) — no piecewise-constant drift.
 	const held = new Map();
 	for (const row of speed) held.set(pulseOf(row), Number(row.split("\t")[4].slice(1)));
 	let last = 1;
@@ -178,9 +179,8 @@ test("continuous speed ramps keep linear regions per-pulse and subsample curved 
 		const trueValue = p < 960
 			? 1 + 0.5 * t
 			: 1.5 - evaluateKsonCurve(0.2, 0.8, t);
-		const bound = Math.max(0.005, Math.abs(trueValue) * 0.005);
-		assert.ok(Math.abs(trueValue - last) < bound + 1e-12,
-			`held speed at pulse ${p} stays within the tolerance (held ${last}, true ${trueValue})`);
+		assert.ok(Math.abs(trueValue - last) <= 1e-9 + Math.abs(trueValue) * 1e-12,
+			`held speed at pulse ${p} matches the curve (held ${last}, true ${trueValue})`);
 	}
 });
 
@@ -192,11 +192,12 @@ test("stops become ManualSpeed f0 blocks that resume at the graph value", () => 
 	assert.equal(sp[stopRow + 1], "001,03,120\tManualSpeed\t0\t0\tf1.625\t0\t0\t0");
 });
 
-test("decorative laser tail sections clip scroll, stops and END POSITION at the last playable pulse", () => {
+test("unprojectable tail sections keep scroll, stops and extend END like the reference", () => {
 	// BT ends at pulse 480 (last playable); the single-point non-slam laser
-	// section at 1200 is nonjudged decoration. Per the reference, the scroll
-	// graph is clipped at 480 (linear interpolation), stops at/after 480 are
-	// dropped, and END POSITION stops following the tail.
+	// section at 1200 is nonjudged decoration whose head value (1) is in
+	// range, so the reference projection cannot relocate it: the scroll
+	// graph and stops stay untouched, and END POSITION keeps following the
+	// kept tail rows (U = 1200 -> measure after = 003,01,00).
 	const warnings = [];
 	const vox = convertKsonToVox({
 		meta: {},
@@ -212,15 +213,13 @@ test("decorative laser tail sections clip scroll, stops and END POSITION at the 
 			laser: [[[1200, [[0, [1, 1]]]]], []],
 		},
 	}, message => warnings.push(message));
-	assert.deepEqual(section(vox, "END POSITION"), ["002,01,00"]);
-	// Only the slam at 240 is emitted; the 480 clip point stays at the same
-	// value (deduped) and the 960 slam is clipped away.
+	assert.deepEqual(section(vox, "END POSITION"), ["003,01,00"]);
 	const speed = section(vox, "SPCONTROLER").filter(r => r.includes("ManualSpeed"));
-	assert.deepEqual(speed.map(r => r.split("\t")[0]), ["001,02,00"]);
-	assert.ok(speed[0].includes("\tf4\t"));
-	// The dropped 720 stop leaves no f0 block behind.
-	assert.ok(!section(vox, "SPCONTROLER").some(r => r.includes("\tf0\t")));
-	assert.ok(warnings.some(w => w.includes("decorative")));
+	assert.deepEqual(speed.map(r => r.split("\t")[0]), ["001,02,00", "001,04,00", "001,04,120", "002,01,00"]);
+	assert.deepEqual(speed.map(r => r.split("\t")[4]), ["f4", "f0", "f4", "f2"]);
+	// The 720 stop stays (no all-projected truncation) as a ManualSpeed f0
+	// block that resumes at the graph value.
+	assert.ok(warnings.some(w => w.includes("Some tail artwork retains")));
 });
 
 test("ManualSpeed output magnitude is capped at 10000", () => {

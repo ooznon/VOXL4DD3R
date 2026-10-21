@@ -42,7 +42,7 @@ are printed after the conversion summary line.
 | `stresstest-short/mxm.ksh` | KSH (stress test) | live editor export (190,419 B) | **byte-identical** |
 | `testdata/oracle.kson` | KSON | live editor export | byte-identical (golden) |
 | `testdata/curve-scroll.kson` | KSON | live editor export | byte-identical (golden) |
-| Arghena (NTC1) | KSON, real chart | live editor export | every section byte-identical except `SPCONTROLER` (speed smoothing + intentional ±10000 cap); all 137 tail decorations relocated identically |
+| Arghena (NTC1) | KSON, real chart | live editor export | every section byte-identical; `SPCONTROLER` matches row-for-row (19193=19193) with only the 34 extreme-value rows differing due to the intentional ±10000 lane-speed cap; all 137 tail decorations relocated identically |
 | local corpus | 28 charts | conversion succeeds | 28 ok / 0 failed |
 | ksm.dev corpus | 14 charts | conversion succeeds | 14 ok / 0 failed |
 
@@ -164,7 +164,9 @@ node --test
   editor: bounded linear chords, combined `BIL_RotZ` for tilt + rotation,
   and `zoom_side` fitted to a roll angle (source timing, direction and values
   are preserved; the original KSON should be kept for exact recovery).
-- Curved lasers play back on VOX's 64th-note sample grid.
+- Curved lasers play back on VOX's 64th-note sample grid; the ManualSpeed
+  scroll is sampled at every pulse exactly like the reference (native
+  ManualSpeed is a step command), so lane speed is not approximated.
 - Effect algorithms are the native VOX DSP: phaser and sidechain have no
   verified parameter mapping (the KSON definition is preserved), tape stop and
   KSM wobble approximate their KSON shapes.
