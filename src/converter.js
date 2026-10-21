@@ -46,6 +46,8 @@
  *   compat.ksh_version numeric in (0,167) => legacy camera projection
  */
 
+import { projectTailDecorations } from "./tail-projection.js";
+
 const VOX_RESOLUTION = 240;
 const LASER_SAMPLE_STEP = 15; // reference writer samples lasers every 15 ticks
 // Reference camera writer chord adapter: 64-chord cap per span, 0.02 absolute
@@ -1025,16 +1027,17 @@ export function attachSpins(sections, spinEvents) {
  * TRACK ORIGINAL L/R dialect. Returns {rows, endPulse}.
  */
 function emitLaserTrack(timeline, sections, attachments, opts) {
-	const { originals = false, lane = 0, bpmEvents = [], laserControlPulses = [], audioFx = null } = opts ?? {};
+	const { originals = false, lane = 0, bpmEvents = [], laserControlPulses = [], audioFx = null, decorative = null } = opts ?? {};
 	const rows = [];
 	let maxPulse = 0;
 	let curvedWarned = false;
 
-	for (const section of sections) {
+	for (const [sectionIndex, section] of sections.entries()) {
 		const startPulse = Math.round(finite(section[0], "laser section pulse"));
 		const rawPoints = Array.isArray(section[1]) ? section[1] : [];
 		const width = section[2] === 2 ? 2 : 1;
 		if (!rawPoints.length) continue;
+		const isDecorative = Boolean(decorative && decorative.has(sectionIndex));
 		const points = rawPoints.map((entry, index) => {
 			const y = finite(entry[0], `laser point [${index}].y`);
 			const [from, to] = parseSpan(entry[1], `laser point [${index}].value`);
@@ -1054,13 +1057,15 @@ function emitLaserTrack(timeline, sections, attachments, opts) {
 			const point = points[i];
 			const next = points[i + 1];
 			const isSlam = point.from !== point.to;
-			// Reference `m`/`p`: the OUTGOING segment is curved (control pair
-			// with distinct controls) and moving (to !== next.from) → its
-			// non-slam from-row, its slam to-row and that segment's samples
-			// carry ct=2; slam from-rows and the final point stay ct=0.
+			// Reference `m`/`p`/`h`: an OUTGOING segment that moves (to !==
+			// next.from) and is EITHER curved (distinct control pair) or part
+			// of a decorative tail projection → its non-slam from-row and its
+			// slam to-row carry ct=2; slam from-rows and the final point stay
+			// ct=0. Only curved segments get the 64th-note samples (`m`).
 			const pair = parseCurvePair(point.curve) ?? [0, 0];
-			const moving = Boolean(next) && pair[0] !== pair[1] && point.to !== next.from;
-			const segCt = originals ? 0 : (moving ? 2 : 0);
+			const moves = Boolean(next) && point.to !== next.from;
+			const moving = moves && pair[0] !== pair[1];
+			const segCt = originals ? 0 : (moving || (moves && isDecorative) ? 2 : 0);
 			if (isSlam) {
 				const spin = attachments.get(`${lane}:${point.pulse}`);
 				let spinCode = 0;
@@ -1288,6 +1293,11 @@ function adaptTerminalJumps({ steps, graph, notes, stops, maxBpm, secondsAtPulse
 
 export function convertKsonToVox(chart, warn = () => {}) {
 	requireObject(chart, "chart");
+	// Reference import order (f_000011 `ie`): decorative tail-laser projection
+	// (module 78799) rewrites laser sections BEFORE anything else reads them.
+	const projection = projectTailDecorations(chart, warn);
+	chart = projection.chart;
+	const tailDecorations = projection.decorations;
 	const meta = chart.meta ?? {};
 	const beat = requireObject(chart.beat ?? {}, "beat");
 	const note = chart.note ?? {};
@@ -1490,6 +1500,12 @@ export function convertKsonToVox(chart, warn = () => {}) {
 
 	// -------------------------------------------------------------- lasers
 	const laserSections = [0, 1].map((lane) => (Array.isArray(note.laser?.[lane]) ? note.laser[lane] : []));
+	// Relocated/trimmed tail sections keep their array slot; the reference
+	// writer flags their moving rows as decorative (ct=2) on TRACK1/TRACK8.
+	const decorativeIndices = [new Set(), new Set()];
+	for (const deco of tailDecorations) {
+		if (deco && decorativeIndices[deco.lane]) decorativeIndices[deco.lane].add(deco.sectionIndex);
+	}
 	const flatSections = laserSections.flat();
 	const spinEvents = collectSpinEvents(chart, flatSections);
 	const { attachments, unmatched } = attachSpins(laserSections, spinEvents);
@@ -1605,13 +1621,13 @@ export function convertKsonToVox(chart, warn = () => {}) {
 
 	let laserCurved = false;
 	if (laserSections[0].length) {
-		const main = emitLaserTrack(timeline, laserSections[0], attachments, { lane: 0, bpmEvents: spinBpmEvents, laserControlPulses, audioFx: laserAudioFx });
+		const main = emitLaserTrack(timeline, laserSections[0], attachments, { lane: 0, bpmEvents: spinBpmEvents, laserControlPulses, audioFx: laserAudioFx, decorative: decorativeIndices[0] });
 		trackRows[0] = main.rows;
 		laserEndPulse = Math.max(laserEndPulse, main.endPulse);
 		laserCurved = laserCurved || main.curved;
 	}
 	if (laserSections[1].length) {
-		const main = emitLaserTrack(timeline, laserSections[1], attachments, { lane: 1, bpmEvents: spinBpmEvents, laserControlPulses, audioFx: laserAudioFx });
+		const main = emitLaserTrack(timeline, laserSections[1], attachments, { lane: 1, bpmEvents: spinBpmEvents, laserControlPulses, audioFx: laserAudioFx, decorative: decorativeIndices[1] });
 		trackRows[7] = main.rows;
 		laserEndPulse = Math.max(laserEndPulse, main.endPulse);
 		laserCurved = laserCurved || main.curved;

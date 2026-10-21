@@ -42,6 +42,7 @@ are printed after the conversion summary line.
 | `stresstest-short/mxm.ksh` | KSH (stress test) | live editor export (190,419 B) | **byte-identical** |
 | `testdata/oracle.kson` | KSON | live editor export | byte-identical (golden) |
 | `testdata/curve-scroll.kson` | KSON | live editor export | byte-identical (golden) |
+| Arghena (NTC1) | KSON, real chart | live editor export | every section byte-identical except `SPCONTROLER` (speed smoothing + intentional ±10000 cap); all 137 tail decorations relocated identically |
 | local corpus | 28 charts | conversion succeeds | 28 ok / 0 failed |
 | ksm.dev corpus | 14 charts | conversion succeeds | 14 ok / 0 failed |
 
@@ -90,10 +91,19 @@ KSON data in VOX* option off.
   strictly inside the segment — no value dedup.
 - Curve-type rule follows the reference `p` semantics: a curved, moving
   outgoing segment marks its non-slam from-row, its slam to-row and its
-  samples `ct=2`.
+  samples `ct=2`; a **decorative** (tail-projected) section's moving rows
+  carry `ct=2` without any sampling (reference `h` flag).
 - KSON quadratic Bézier curves evaluate through the reference's closed-form
   solve (`O`/`A`), so 6dp / 12-significant-digit formatting lands on the same
   side of every rounding straddle.
+- Nonjudged decorative tail sections (pseudo-slam heads past the last
+  playable pulse) are **relocated** into earlier forward-scroll gaps at
+  import, exactly like reference module 78799: candidate gaps are matched by
+  accumulated scroll-distance range, body points round onto the destination
+  scroll grid with a bounded error, sections are rewritten in place (so rows
+  emit in array order), and `scroll_speed`/`stop` declarations past the
+  playable pulse are dropped once every tail section projects. Stop-hidden
+  pseudo-slams that cannot move lose only their out-of-range head point.
 
 ### Camera and timing
 
@@ -158,9 +168,6 @@ node --test
 - Effect algorithms are the native VOX DSP: phaser and sidechain have no
   verified parameter mapping (the KSON definition is preserved), tape stop and
   KSM wobble approximate their KSON shapes.
-- Nonjudged decorative laser tail sections (beyond the last playable pulse)
-  are kept at their source timing while the reference *relocates* them into
-  earlier gaps; the scroll/stop/`END POSITION` clip already matches.
 - Laser flanger automation (`H`/`M` KSON effects) is not ported; other laser
   audio effects (retrigger, gate, wobble, switch) drive `TAB EFFECT INFO` and
   the per-row filter index exactly like the reference.
