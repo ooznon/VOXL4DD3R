@@ -26,6 +26,9 @@ node src\cli.js "C:\charts" -o "C:\vox-out"
 
 # clamp chart speeds (KSON/KSH units, 1 = normal speed) that make the game lag
 node src\cli.js "C:\charts" --max-speed 7306
+
+# keep reverse (negative-speed) sections from hiding notes in game
+node src\cli.js "chart.ksh" --min-speed 0
 ```
 
 By default each output is written beside its input as `chart.vox`; in batch
@@ -34,12 +37,18 @@ mode one failing chart does not stop the rest, and same-name collisions
 a note. In VS Code, select **Run and Debug → Convert KSON to VOX** for the
 interactive prompt.
 
-Two speed limits are available: `--max-speed <n>` clamps each chart's own
+Speed limits are available: `--max-speed <n>` clamps each chart's own
 `scroll_speed` values (KSON/KSH speed units, 1 = normal speed) *before*
 conversion, so speed ramps run down to the limit — use it when charts
 beyond a certain scroll speed stutter or drop notes in game (official charts
 stay within ±7306); `--speed-cap <n|none>` bounds the emitted `ManualSpeed`
 rows only (default ±10000). When both are set, output never exceeds either.
+`--min-speed <n>` floors the same graph before conversion — the game culls
+notes whose scroll integral goes behind the judgment line, so negative-speed
+(reverse) sections hide notes; `--min-speed 0` removes reverse scroll
+entirely (notes freeze in place instead of disappearing), a small negative
+floor like `-1` keeps a gentle reverse. Default output is unchanged, so
+charts without the flag stay byte-identical.
 
 Diagnostics (camera approximations, native DSP fallbacks, dropped KSH lasers)
 are printed after the conversion summary line.

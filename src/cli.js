@@ -7,7 +7,7 @@ function printUsage() {
 	console.error([
 		"Usage:",
 		"  node src/cli.js <input.ksh|input.kson> [output.vox]",
-		"  node src/cli.js <file|dir>... [-o <outputDir>] [--speed-cap <n|none>] [--max-speed <n>]",
+		"  node src/cli.js <file|dir>... [-o <outputDir>] [--speed-cap <n|none>] [--max-speed <n>] [--min-speed <n>]",
 		"",
 		"Batch mode converts every .ksh/.kson chart given; directory arguments",
 		"are scanned recursively. Outputs are written beside each input, or",
@@ -17,6 +17,8 @@ function printUsage() {
 		"--max-speed clamps the chart's own scroll_speed values (KSON/KSH speed",
 		"units, 1 = normal speed) to ±n before conversion, so speed ramps run",
 		"down to the limit; emitted ManualSpeed never exceeds either cap.",
+		"--min-speed floors those values at n (0 = no reverse scroll) because",
+		"the game hides notes during negative-speed sections.",
 	].join("\n"));
 }
 
@@ -163,6 +165,19 @@ async function main(argv) {
 				return 2;
 			}
 			convertOptions.maxSpeed = value;
+		} else if (arg === "--min-speed") {
+			const raw = argv[++i];
+			if (raw == null) {
+				console.error(`Missing value after ${arg}`);
+				printUsage();
+				return 2;
+			}
+			const value = Number(raw);
+			if (!Number.isFinite(value)) {
+				console.error(`Invalid min speed: ${raw} (expected a number in KSON/KSH speed units, 1 = normal speed; 0 disables reverse scroll)`);
+				return 2;
+			}
+			convertOptions.minSpeed = value;
 		} else if (arg === "--help" || arg === "-h") {
 			printUsage();
 			return 0;

@@ -281,6 +281,43 @@ test("--max-speed clamps chart-unit scroll_speed before the step timeline", () =
 	assert.deepEqual(tight.values.filter(v => Math.abs(v) > 2000), [], "the tighter of the two caps wins");
 });
 
+test("--min-speed floors negative chart-unit scroll_speed", () => {
+	// Negative (reverse) scroll hides notes in game: the engine computes
+	// upcoming notes as behind the judgment line once the scroll integral
+	// goes negative. minSpeed floors the graph (like maxSpeed clamps it) so
+	// ramps settle at the floor; 0 means no reverse scroll at all.
+	const reverseChart = {
+		meta: {},
+		beat: {
+			bpm: [[0, 185]],
+			time_sig: [[0, [4, 4]]],
+			scroll_speed: [[0, 1], [960, [1, -8]], [2880, 1]],
+		},
+		note: { bt: [[[0, 3840]]], fx: [[], []], laser: [[], []] },
+	};
+	const speedValues = (options) => {
+		const warnings = [];
+		const vox = convertKsonToVox(reverseChart, (message) => warnings.push(message), options);
+		return {
+			warnings,
+			values: section(vox, "SPCONTROLER").filter(r => r.includes("ManualSpeed"))
+				.map(r => Number(r.split("\t")[4].slice(1))),
+		};
+	};
+
+	// Default output keeps the reverse segment untouched (byte parity).
+	assert.ok(speedValues({}).values.some(v => v < 0), "reverse scroll is emitted by default");
+
+	const floored = speedValues({ minSpeed: 0 });
+	assert.deepEqual(floored.values.filter(v => v < 0), [], "no ManualSpeed goes below the min speed");
+	assert.ok(floored.values.includes(0), "the ramp settles at the floor");
+	assert.ok(floored.warnings.some(w => w.includes("floored to the min speed")), `flooring is reported: ${floored.warnings}`);
+
+	// A partial floor keeps a gentle reverse while still bounding it.
+	const gentle = speedValues({ minSpeed: -1 });
+	assert.deepEqual(gentle.values.filter(v => v < -1), [], "reverse scroll is bounded by the floor");
+});
+
 // ---------------------------------------------------------------------------
 // FX / BT notes
 // ---------------------------------------------------------------------------

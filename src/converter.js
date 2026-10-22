@@ -1698,15 +1698,24 @@ export function convertKsonToVox(chart, warn = () => {}, options = {}) {
 	// value instead of riding the (much higher) default ±10000 output cap as
 	// a clipped plateau. When both are set, the emitted magnitude never
 	// exceeds either limit.
+	// options.minSpeed floors the same graph (0 = no reverse scroll): the
+	// engine culls notes whose scroll integral goes behind the judgment line,
+	// so negative-speed sections hide notes in game.
 	const maxSpeed = Number.isFinite(options.maxSpeed) && options.maxSpeed > 0 ? options.maxSpeed : Infinity;
+	const minSpeed = Number.isFinite(options.minSpeed) ? options.minSpeed : -Infinity;
 	let clampedSpeedPoints = 0;
+	let flooredSpeedPoints = 0;
 	const scroll = flattenGraph(beat.scroll_speed ?? [[0, 1]], "beat.scroll_speed", (v) => {
+		if (v < minSpeed) { flooredSpeedPoints += 1; v = minSpeed; }
 		if (v > maxSpeed) { clampedSpeedPoints += 1; return maxSpeed; }
 		if (v < -maxSpeed) { clampedSpeedPoints += 1; return -maxSpeed; }
 		return v;
 	});
 	if (clampedSpeedPoints) {
 		warn(`Chart scroll_speed exceeded ±${maxSpeed} (chart speed units, 1 = normal) at ${clampedSpeedPoints} graph point(s) and was clamped to the max speed.`);
+	}
+	if (flooredSpeedPoints) {
+		warn(`Chart scroll_speed went below ${minSpeed} (chart speed units, 1 = normal) at ${flooredSpeedPoints} graph point(s) and was floored to the min speed; negative scroll hides notes in game.`);
 	}
 	const stops = (Array.isArray(beat.stop) ? beat.stop : []).map((entry) => ({
 		pulse: Math.max(0, Math.round(Number(entry[0]))),

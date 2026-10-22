@@ -135,3 +135,31 @@ test("--max-speed clamps chart-unit speeds and rejects bad values", async () => 
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("--min-speed floors reverse scroll and rejects bad values", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "voxl4dd3r-"));
+	try {
+		const reversy = {
+			...chart,
+			beat: { bpm: [[0, 120]], time_sig: [[0, [4, 4]]], scroll_speed: [[0, 1], [960, [1, -8]], [1920, 1]] },
+		};
+		const input = path.join(dir, "reverse.kson");
+		fs.writeFileSync(input, JSON.stringify(reversy));
+		const { stderr } = await run(process.execPath, [cli, input, "--min-speed", "0"]);
+		assert.ok(stderr.includes("floored to the min speed"), stderr);
+		const vox = fs.readFileSync(path.join(dir, "reverse.vox"), "ascii");
+		const values = vox.split(/\r?\n/).filter(r => r.includes("ManualSpeed"))
+			.map(r => Number(r.split("\t")[4].slice(1)));
+		assert.ok(values.includes(0), `the floor is emitted: ${values}`);
+		assert.deepEqual(values.filter(v => v < 0), [], "no ManualSpeed goes below --min-speed");
+
+		const bad = await run(process.execPath, [cli, input, "--min-speed", "abc"]).then(
+			() => assert.fail("expected a nonzero exit"),
+			(e) => e,
+		);
+		assert.equal(bad.code, 2);
+		assert.ok(bad.stderr.includes("Invalid min speed"), bad.stderr);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
