@@ -318,6 +318,36 @@ test("--min-speed floors negative chart-unit scroll_speed", () => {
 	assert.deepEqual(gentle.values.filter(v => v < -1), [], "reverse scroll is bounded by the floor");
 });
 
+test("--flag-reverse marks negative ManualSpeed rows with the native visual-scroll flag", () => {
+	// Official charts (vallis 068, kiskillilia 122, exrixis 056) put bit 31
+	// (2147483648) in the first int field of ManualSpeed rows that script the
+	// scroll without displacing notes. flagReverse applies the same marker to
+	// negative rows so reverse sections stay visible in game.
+	const reverseChart = {
+		meta: {},
+		beat: {
+			bpm: [[0, 185]],
+			time_sig: [[0, [4, 4]]],
+			scroll_speed: [[0, 1], [960, [1, -8]], [2880, 1]],
+		},
+		note: { bt: [[[0, 3840]]], fx: [[], []], laser: [[], []] },
+	};
+	const speedRows = (options) => {
+		const vox = convertKsonToVox(reverseChart, () => {}, options);
+		return section(vox, "SPCONTROLER").filter(r => r.includes("ManualSpeed"));
+	};
+	const value = (r) => Number(r.split("\t")[4].slice(1));
+	const flag = (r) => Number(r.split("\t")[2]);
+
+	// Default output keeps flag 0 (byte parity).
+	assert.ok(speedRows({}).every(r => flag(r) === 0), "no flag by default");
+
+	const flagged = speedRows({ flagReverse: true });
+	assert.ok(flagged.some(r => value(r) < 0), "reverse scroll is still emitted");
+	assert.ok(flagged.every(r => (value(r) < 0) === (flag(r) === 2147483648)),
+		"exactly the negative rows carry 2147483648");
+});
+
 // ---------------------------------------------------------------------------
 // FX / BT notes
 // ---------------------------------------------------------------------------

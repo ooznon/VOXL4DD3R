@@ -1852,7 +1852,13 @@ export function convertKsonToVox(chart, warn = () => {}, options = {}) {
 			const capped = capSpeed(value);
 			const fitted = capSpeed(fitSpeedValue(capped, pulse, steps[i + 1]?.pulse, bpmTable[bpmIndex]?.bpm ?? 120));
 			if (fitted !== last) {
-				spRows.push(`${timeline.format(pulse)}\tManualSpeed\t0\t0\tf${formatSpeedValue(fitted)}\t0\t0\t0`);
+				// options.flagReverse: negative rows get bit 31 (2147483648) in
+				// the first int field — the same marker official charts put on
+				// scripted scroll teleports (f5730 spikes in vallis/kiskillilia/
+				// exrixis) so the engine treats the row as visual-only scroll
+				// instead of displacing note positions.
+				const flag = options.flagReverse && fitted < 0 ? 2147483648 : 0;
+				spRows.push(`${timeline.format(pulse)}\tManualSpeed\t${flag}\t0\tf${formatSpeedValue(fitted)}\t0\t0\t0`);
 				last = fitted;
 			}
 		}

@@ -163,3 +163,27 @@ test("--min-speed floors reverse scroll and rejects bad values", async () => {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("--flag-reverse marks negative ManualSpeed rows with 2147483648", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "voxl4dd3r-"));
+	try {
+		const reversy = {
+			...chart,
+			beat: { bpm: [[0, 120]], time_sig: [[0, [4, 4]]], scroll_speed: [[0, 1], [960, [1, -8]], [1920, 1]] },
+		};
+		const input = path.join(dir, "reverse.kson");
+		fs.writeFileSync(input, JSON.stringify(reversy));
+		await run(process.execPath, [cli, input, path.join(dir, "flagged.vox"), "--flag-reverse"]);
+		const flags = (out) => fs.readFileSync(out, "ascii").split(/\r?\n/)
+			.filter(r => r.includes("ManualSpeed"))
+			.map(r => Number(r.split("\t")[2]));
+		const flagged = flags(path.join(dir, "flagged.vox"));
+		assert.ok(flagged.includes(2147483648), `negative rows are flagged: ${flagged}`);
+		assert.deepEqual(flagged.filter(f => f !== 0 && f !== 2147483648), [], "only bit 31 is set");
+
+		await run(process.execPath, [cli, input, path.join(dir, "plain.vox")]);
+		assert.deepEqual(flags(path.join(dir, "plain.vox")).filter(f => f !== 0), [], "no flag by default");
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});

@@ -7,7 +7,7 @@ function printUsage() {
 	console.error([
 		"Usage:",
 		"  node src/cli.js <input.ksh|input.kson> [output.vox]",
-		"  node src/cli.js <file|dir>... [-o <outputDir>] [--speed-cap <n|none>] [--max-speed <n>] [--min-speed <n>]",
+		"  node src/cli.js <file|dir>... [-o <outputDir>] [--speed-cap <n|none>] [--max-speed <n>] [--min-speed <n>] [--flag-reverse]",
 		"",
 		"Batch mode converts every .ksh/.kson chart given; directory arguments",
 		"are scanned recursively. Outputs are written beside each input, or",
@@ -19,6 +19,10 @@ function printUsage() {
 		"down to the limit; emitted ManualSpeed never exceeds either cap.",
 		"--min-speed floors those values at n (0 = no reverse scroll) because",
 		"the game hides notes during negative-speed sections.",
+		"--flag-reverse instead marks negative ManualSpeed rows with bit 31",
+		"(2147483648), the native flag official charts use on scripted",
+		"scroll teleports so they do not displace notes; experimental —",
+		"verify note visibility in game before relying on it.",
 	].join("\n"));
 }
 
@@ -165,6 +169,8 @@ async function main(argv) {
 				return 2;
 			}
 			convertOptions.maxSpeed = value;
+		} else if (arg === "--flag-reverse") {
+			convertOptions.flagReverse = true;
 		} else if (arg === "--min-speed") {
 			const raw = argv[++i];
 			if (raw == null) {

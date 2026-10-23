@@ -29,6 +29,10 @@ node src\cli.js "C:\charts" --max-speed 7306
 
 # keep reverse (negative-speed) sections from hiding notes in game
 node src\cli.js "chart.ksh" --min-speed 0
+
+# experimental: mark reverse scroll with the native visual-scroll flag
+# instead of flooring it (keeps the reverse look, notes stay visible)
+node src\cli.js "chart.ksh" --flag-reverse
 ```
 
 By default each output is written beside its input as `chart.vox`; in batch
@@ -49,6 +53,16 @@ notes whose scroll integral goes behind the judgment line, so negative-speed
 entirely (notes freeze in place instead of disappearing), a small negative
 floor like `-1` keeps a gentle reverse. Default output is unchanged, so
 charts without the flag stay byte-identical.
+
+`--flag-reverse` takes the other approach: instead of flooring reverse
+scroll, it marks every negative `ManualSpeed` row with bit 31
+(`2147483648`) in the row's first int field — the same marker the
+official charts (vallis, KisKillia, EXrixis) put on their scripted scroll
+teleports, which the engine treats as visual-only scroll that does not
+displace notes. This may keep the reverse-scroll illusion *and* note
+visibility at once; it is unverified against official documentation, so
+test in game before relying on it. Can be combined with `--min-speed`
+to bound the reverse depth while keeping the flag.
 
 Diagnostics (camera approximations, native DSP fallbacks, dropped KSH lasers)
 are printed after the conversion summary line.
