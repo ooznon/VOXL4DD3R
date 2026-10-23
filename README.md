@@ -33,6 +33,9 @@ node src\cli.js "chart.ksh" --min-speed 0
 # experimental: mark reverse scroll with the native visual-scroll flag
 # instead of flooring it (keeps the reverse look, notes stay visible)
 node src\cli.js "chart.ksh" --flag-reverse
+
+# shape reverse sections into a visibility budget (default 0.5 measures)
+node src\cli.js "chart.ksh" --safe-reverse
 ```
 
 By default each output is written beside its input as `chart.vox`; in batch
@@ -59,10 +62,21 @@ scroll, it marks every negative `ManualSpeed` row with bit 31
 (`2147483648`) in the row's first int field — the same marker the
 official charts (vallis, KisKillia, EXrixis) put on their scripted scroll
 teleports, which the engine treats as visual-only scroll that does not
-displace notes. This may keep the reverse-scroll illusion *and* note
-visibility at once; it is unverified against official documentation, so
-test in game before relying on it. Can be combined with `--min-speed`
-to bound the reverse depth while keeping the flag.
+displace notes. In-game testing showed the flag does **not** prevent note
+culling on negative speeds (it only helps positive teleports), so treat
+it as informational; combine with `--min-speed` or `--safe-reverse` if
+notes must stay visible.
+
+`--safe-reverse [budget]` shapes reverse instead of removing it. The game
+hides notes once the scroll integral has fallen behind its running peak —
+calibration on two test charts: a drift of 0.5 measures of scroll distance
+stayed visible, 2.8 hid notes for ~1.5 measures, and 7.4 for much longer.
+For each negative window the converter scales the magnitudes down (binary
+search) only as far as needed to keep the accumulated drift within the
+budget (default 0.5 measures; pass a number to override, e.g.
+`--safe-reverse 0.25`). Deep short reverse survives wherever it fits; long
+windows become gentle drifts; narrow slam spikes (<24 pulses) are skipped
+because the engine does not integrate them. Default output is unchanged.
 
 Diagnostics (camera approximations, native DSP fallbacks, dropped KSH lasers)
 are printed after the conversion summary line.

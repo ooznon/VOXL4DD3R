@@ -187,3 +187,49 @@ test("--flag-reverse marks negative ManualSpeed rows with 2147483648", async () 
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("--safe-reverse bounds reverse drift and accepts a budget argument", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "voxl4dd3r-"));
+	try {
+		// Long reverse window: drift = 4 * 1920 / 2 = 3840 pulse-units = 4 measures.
+		const reversy = {
+			...chart,
+			beat: { bpm: [[0, 120]], time_sig: [[0, [4, 4]]], scroll_speed: [[0, 1], [960, [1, -4]], [2880, 1]] },
+		};
+		const input = path.join(dir, "reverse.kson");
+		fs.writeFileSync(input, JSON.stringify(reversy));
+		const drift = async (args) => {
+			const out = path.join(dir, `out${args.length}.vox`);
+			const { stderr } = await run(process.execPath, [cli, input, out, ...args]);
+			const rows = fs.readFileSync(out, "ascii").split(/\r?\n/)
+				.filter(r => r.includes("ManualSpeed"))
+				.map(r => {
+					const parts = r.split("\t");
+					const [m, b, t] = parts[0].split(",").map(Number);
+					return { pulse: (m - 1) * 960 + (b - 1) * 240 + t, spd: Number(parts[4].slice(1)) };
+				})
+				.sort((a, b) => a.pulse - b.pulse);
+			let acc = 0;
+			let max = 0;
+			for (let i = 0; i < rows.length; i++) {
+				const dt = i + 1 < rows.length ? rows[i + 1].pulse - rows[i].pulse : 0;
+				if (rows[i].spd < 0) { acc += -rows[i].spd * dt; if (acc > max) max = acc; }
+				else acc = Math.max(0, acc - rows[i].spd * dt);
+			}
+			return { stderr, maxDrift: max / 960 };
+		};
+
+		const base = await drift([]);
+		assert.ok(base.maxDrift > 3, `default keeps full reverse: ${base.maxDrift}`);
+
+		const safe = await drift(["--safe-reverse"]);
+		assert.ok(safe.maxDrift <= 0.5 + 1e-6, `default budget 0.5 bounds the drift: ${safe.maxDrift}`);
+		assert.ok(safe.stderr.includes("safe-reverse"), safe.stderr);
+
+		const loose = await drift(["--safe-reverse", "2"]);
+		assert.ok(loose.maxDrift <= 2 + 1e-6, `the budget argument is honored: ${loose.maxDrift}`);
+		assert.ok(loose.maxDrift > safe.maxDrift, "a bigger budget keeps more reverse");
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});

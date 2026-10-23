@@ -7,7 +7,7 @@ function printUsage() {
 	console.error([
 		"Usage:",
 		"  node src/cli.js <input.ksh|input.kson> [output.vox]",
-		"  node src/cli.js <file|dir>... [-o <outputDir>] [--speed-cap <n|none>] [--max-speed <n>] [--min-speed <n>] [--flag-reverse]",
+		"  node src/cli.js <file|dir>... [-o <outputDir>] [--speed-cap <n|none>] [--max-speed <n>] [--min-speed <n>] [--flag-reverse] [--safe-reverse [n]]",
 		"",
 		"Batch mode converts every .ksh/.kson chart given; directory arguments",
 		"are scanned recursively. Outputs are written beside each input, or",
@@ -23,6 +23,11 @@ function printUsage() {
 		"(2147483648), the native flag official charts use on scripted",
 		"scroll teleports so they do not displace notes; experimental —",
 		"verify note visibility in game before relying on it.",
+		"--safe-reverse shapes reverse sections instead: each negative",
+		"window is scaled down only as far as needed to keep the scroll",
+		"drift within a visibility budget (default 0.5 measures; optional",
+		"argument overrides it), so notes never go invisible while deep",
+		"short reverse is kept wherever it fits.",
 	].join("\n"));
 }
 
@@ -171,6 +176,13 @@ async function main(argv) {
 			convertOptions.maxSpeed = value;
 		} else if (arg === "--flag-reverse") {
 			convertOptions.flagReverse = true;
+		} else if (arg === "--safe-reverse") {
+			convertOptions.safeReverse = true;
+			const raw = argv[i + 1];
+			if (raw != null && !raw.startsWith("-") && Number.isFinite(Number(raw))) {
+				i++;
+				convertOptions.safeReverseBudget = Number(raw);
+			}
 		} else if (arg === "--min-speed") {
 			const raw = argv[++i];
 			if (raw == null) {

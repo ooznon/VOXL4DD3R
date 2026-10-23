@@ -348,6 +348,68 @@ test("--flag-reverse marks negative ManualSpeed rows with the native visual-scro
 		"exactly the negative rows carry 2147483648");
 });
 
+test("--safe-reverse bounds each reverse window to the drift budget", () => {
+	// In game, notes vanish once the scroll integral has fallen behind its
+	// running peak (empirically: drift 0.5 measures of scroll distance stays
+	// visible, drift 2.8 hides notes for ~1.5 measures). safeReverse scales
+	// negative windows down only as far as needed to keep the accumulated
+	// drift within the budget, so deep short reverse survives while long
+	// windows become gentle drifts.
+	const scaleChart = {
+		meta: {},
+		beat: {
+			bpm: [[0, 185]],
+			time_sig: [[0, [4, 4]]],
+			// A short deep window (drift 0.25 measures — fits the budget)
+			// and a long shallow one (drift 6.4 — does not).
+			scroll_speed: [[0, 1], [960, [1, -8]], [1080, [8, 1]], [2880, [1, -4]], [6720, 1]],
+		},
+		note: { bt: [[[0, 7680]]], fx: [[], []], laser: [[], []] },
+	};
+	// Max accumulated drift in 4/4-measures over the emitted ManualSpeed rows.
+	const drift = (options) => {
+		const warnings = [];
+		const vox = convertKsonToVox(scaleChart, (message) => warnings.push(message), options);
+		const rows = section(vox, "SPCONTROLER").filter(r => r.includes("ManualSpeed"))
+			.map(r => {
+				const [pos, , , , spd] = r.split("\t");
+				const [m, b, tick] = pos.split(",").map(Number);
+				return { pulse: (m - 1) * 960 + (b - 1) * 240 + tick, spd: Number(spd.slice(1)) };
+			})
+			.sort((a, b) => a.pulse - b.pulse);
+		let acc = 0;
+		let max = 0;
+		let minSpd = 0;
+		for (let i = 0; i < rows.length; i++) {
+			const dt = i + 1 < rows.length ? rows[i + 1].pulse - rows[i].pulse : 0;
+			if (rows[i].spd < 0) {
+				acc += -rows[i].spd * dt;
+				if (acc > max) max = acc;
+				if (rows[i].spd < minSpd) minSpd = rows[i].spd;
+			} else acc = Math.max(0, acc - rows[i].spd * dt);
+		}
+		return { warnings, maxDrift: max / 960, minSpd };
+	};
+
+	// Default output keeps full reverse depth (byte parity).
+	const base = drift({});
+	assert.ok(base.minSpd <= -8, `default keeps the deep window: ${base.minSpd}`);
+
+	// Budget 0.5: drift is bounded but reverse is not removed. The short
+	// window's -8 survives untouched (it fits), so the drift drop from the
+	// long window proves the scaling.
+	const safe = drift({ safeReverse: true });
+	assert.ok(base.maxDrift > 3, `default keeps full reverse drift: ${base.maxDrift}`);
+	assert.ok(safe.maxDrift <= 0.5 + 1e-6, `drift stays within the budget: ${safe.maxDrift}`);
+	assert.ok(safe.minSpd < 0, "reverse scroll still exists (gentle where needed)");
+	assert.ok(safe.warnings.some(w => w.includes("safe-reverse")), `shaping is reported: ${safe.warnings}`);
+
+	// A larger budget keeps more reverse.
+	const loose = drift({ safeReverse: true, safeReverseBudget: 2 });
+	assert.ok(loose.maxDrift <= 2 + 1e-6, `drift stays within the custom budget: ${loose.maxDrift}`);
+	assert.ok(loose.maxDrift > safe.maxDrift, "a bigger budget allows deeper reverse");
+});
+
 // ---------------------------------------------------------------------------
 // FX / BT notes
 // ---------------------------------------------------------------------------

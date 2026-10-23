@@ -376,6 +376,104 @@ function flattenGraph(graph, label, valueTransform = (v) => v) {
 	}).sort((a, b) => a.pulse - b.pulse);
 }
 
+// Narrow negative spikes (slam markers in the KSON scroll graph) are
+// skipped by safe-reverse shaping: the engine samples scroll per frame,
+// so a spike shorter than this never contributes to the integral.
+const SAFE_REVERSE_MIN_WINDOW = 24;
+
+/**
+ * Shape reverse sections so they stay visible in game (options.safeReverse).
+ * The engine hides notes once the scroll integral has fallen `budget`
+ * (4/4-measures of scroll distance, 960 pulses at speed 1) behind its
+ * running peak — calibrating on two test charts, a drift of 0.5 stayed
+ * visible while 2.8 hid notes for ~1.5 measures. Instead of flooring all
+ * reverse scroll, each negative window's magnitudes are scaled down —
+ * only as much as needed — until the drift stays within the budget, so
+ * short windows keep deep reverse and long ones become gentle drifts.
+ * Mutates `points` in place; returns the number of scaled windows.
+ */
+export function shapeSafeReverse(points, budget, warn) {
+	if (!points.length) return 0;
+	// The caller's budget is in 4/4-measures of scroll distance; the
+	// accumulator below works in pulse-units of integrated speed.
+	const budgetPulses = budget * 960;
+	const lastPulse = Math.ceil(points.at(-1).pulse);
+	const orig = points.map((p) => ({ from: p.from, to: p.to }));
+	const graph = makeGraph(points);
+	const samples = new Float64Array(lastPulse + 1);
+	let scaledWindows = 0;
+	for (let iter = 0; iter < 64; iter++) {
+		for (let t = 0; t <= lastPulse; t++) samples[t] = graph(t);
+		// Negative windows on the sampled graph.
+		const windows = [];
+		let start = -1;
+		for (let t = 0; t <= lastPulse; t++) {
+			if (samples[t] < 0) { if (start < 0) start = t; }
+			else if (start >= 0) { windows.push({ start, end: t - 1, narrow: t - start < SAFE_REVERSE_MIN_WINDOW }); start = -1; }
+		}
+		// The engine does not integrate slam spikes (narrow windows), so
+		// they do not count toward the drift either.
+		const ignored = new Uint8Array(lastPulse + 1);
+		for (const w of windows) if (w.narrow) ignored.fill(1, w.start, w.end + 1);
+		let acc = 0;
+		let over = -1;
+		for (let t = 0; t <= lastPulse && over < 0; t++) {
+			const v = ignored[t] ? 0 : samples[t];
+			acc = v < 0 ? acc - v : Math.max(0, acc - v);
+			if (acc > budgetPulses) over = t;
+		}
+		if (over < 0) break;
+		const w = windows.find((x) => !x.narrow && x.start <= over && over <= x.end);
+		if (!w) break; // safety: never loop on an unscalable violation
+		let accIn = 0;
+		for (let t = 0; t < w.start; t++) {
+			const v = ignored[t] ? 0 : samples[t];
+			accIn = v < 0 ? accIn - v : Math.max(0, accIn - v);
+		}
+		// Scale the window's negative point values absolutely (from the
+		// original snapshot, so repeated searches do not compound). The
+		// range starts at the last point before the window — a window can
+		// begin mid-span, and that span's dip comes from the *next*
+		// point's negative `from` — and ends at the first point past the
+		// window, whose negative `from` drives the climb back out.
+		let firstIdx = points.findIndex((p) => p.pulse > w.start);
+		if (firstIdx < 0) firstIdx = points.length - 1;
+		while (firstIdx > 0 && points[firstIdx - 1].pulse >= w.start) firstIdx--;
+		if (firstIdx > 0) firstIdx--; // include the span that dips into the window
+		const lastIdx = (() => {
+			let i = points.findIndex((p) => p.pulse > w.end);
+			return i < 0 ? points.length - 1 : i;
+		})();
+		const apply = (k) => {
+			for (let i = firstIdx; i <= lastIdx; i++) {
+				const p = points[i];
+				p.from = orig[i].from < 0 ? orig[i].from * k : orig[i].from;
+				p.to = orig[i].to < 0 ? orig[i].to * k : orig[i].to;
+			}
+		};
+		const area = (k) => {
+			apply(k);
+			let a = 0;
+			for (let t = w.start; t <= points[lastIdx].pulse; t++) { const v = graph(t); if (v < 0) a -= v; }
+			return a;
+		};
+		if (area(1) + accIn <= budgetPulses) break; // safety: violation not in this window
+		// Binary search the largest scale that keeps the drift in budget.
+		let lo = 0;
+		let hi = 1;
+		for (let i = 0; i < 20; i++) {
+			const mid = (lo + hi) / 2;
+			if (area(mid) + accIn <= budgetPulses) lo = mid; else hi = mid;
+		}
+		apply(lo);
+		scaledWindows++;
+	}
+	if (scaledWindows) {
+		warn(`--safe-reverse scaled ${scaledWindows} reverse window(s) down to keep the scroll drift within ${budget} (4/4-measures of scroll distance); the game hides notes once the drift grows past that.`);
+	}
+	return scaledWindows;
+}
+
 // ------------------------------------------------- camera projection (ported)
 
 const DEG = Math.PI / 180;
@@ -1716,6 +1814,14 @@ export function convertKsonToVox(chart, warn = () => {}, options = {}) {
 	}
 	if (flooredSpeedPoints) {
 		warn(`Chart scroll_speed went below ${minSpeed} (chart speed units, 1 = normal) at ${flooredSpeedPoints} graph point(s) and was floored to the min speed; negative scroll hides notes in game.`);
+	}
+	// options.safeReverse shapes instead of flooring: negative windows are
+	// scaled down only as far as needed to keep the scroll drift (the
+	// accumulated deficit the engine has not yet repaid) within the
+	// visibility budget, so reverse stays as deep as notes allow.
+	// options.safeReverseBudget overrides the default 0.5-measure budget.
+	if (options.safeReverse && scroll.length) {
+		shapeSafeReverse(scroll, Number.isFinite(options.safeReverseBudget) ? options.safeReverseBudget : 0.5, warn);
 	}
 	const stops = (Array.isArray(beat.stop) ? beat.stop : []).map((entry) => ({
 		pulse: Math.max(0, Math.round(Number(entry[0]))),
