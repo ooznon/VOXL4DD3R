@@ -383,16 +383,18 @@ const SAFE_REVERSE_MIN_WINDOW = 24;
 
 /**
  * Shape reverse sections so they stay visible in game (options.safeReverse).
- * The engine hides notes once the scroll integral has fallen `budget`
- * (4/4-measures of scroll distance, 960 pulses at speed 1) behind its
- * running peak — calibrating on two test charts, a drift of 0.5 stayed
- * visible while 2.8 hid notes for ~1.5 measures. Instead of flooring all
- * reverse scroll, each negative window's magnitudes are scaled down —
- * only as much as needed — until the drift stays within the budget, so
- * short windows keep deep reverse and long ones become gentle drifts.
- * Mutates `points` in place; returns the number of scaled windows.
+ * The engine hides notes while the scroll integral is behind its running
+ * peak — calibrating on two test charts, a drift of 0.5 stayed visible
+ * while 2.8 hid notes for ~1.5 measures. Instead of flooring all reverse
+ * scroll, each negative window's magnitudes are scaled down — only as much
+ * as needed — until the drift stays within the budget, so short windows
+ * keep deep reverse and long ones become gentle drifts. On top of the
+ * budget, every note outside a reverse window forces the drift back to
+ * zero at its pulse: a note immediately after a reverse window stays
+ * hidden until the deficit is fully repaid there. Mutates `points` in
+ * place; returns the number of scaled windows.
  */
-export function shapeSafeReverse(points, budget, warn) {
+export function shapeSafeReverse(points, budget, warn, notePulses = []) {
 	if (!points.length) return 0;
 	// The caller's budget is in 4/4-measures of scroll distance; the
 	// accumulator below works in pulse-units of integrated speed.
@@ -401,8 +403,9 @@ export function shapeSafeReverse(points, budget, warn) {
 	const orig = points.map((p) => ({ from: p.from, to: p.to }));
 	const graph = makeGraph(points);
 	const samples = new Float64Array(lastPulse + 1);
+	const noteSet = new Set(notePulses.map((p) => Math.round(p)));
 	let scaledWindows = 0;
-	for (let iter = 0; iter < 64; iter++) {
+	for (let iter = 0; iter < 256; iter++) {
 		for (let t = 0; t <= lastPulse; t++) samples[t] = graph(t);
 		// Negative windows on the sampled graph.
 		const windows = [];
@@ -415,15 +418,27 @@ export function shapeSafeReverse(points, budget, warn) {
 		// they do not count toward the drift either.
 		const ignored = new Uint8Array(lastPulse + 1);
 		for (const w of windows) if (w.narrow) ignored.fill(1, w.start, w.end + 1);
+		const inWindow = (t) => windows.some((x) => !x.narrow && x.start <= t && t <= x.end);
 		let acc = 0;
 		let over = -1;
+		let overNote = false;
 		for (let t = 0; t <= lastPulse && over < 0; t++) {
 			const v = ignored[t] ? 0 : samples[t];
 			acc = v < 0 ? acc - v : Math.max(0, acc - v);
-			if (acc > budgetPulses) over = t;
+			// A note outside a reverse window needs the deficit cleared at
+			// its pulse (stricter than the budget); notes riding inside a
+			// window keep the budget rule. 1e-6 pulse-units of residue is
+			// the binary search's tolerance, not a real deficit.
+			if (acc > 1e-6 && noteSet.has(t) && !inWindow(t)) { over = t; overNote = true; }
+			else if (acc > budgetPulses) over = t;
 		}
 		if (over < 0) break;
-		const w = windows.find((x) => !x.narrow && x.start <= over && over <= x.end);
+		// Scale the window that produced the violation: the one containing
+		// it, or — when the deficit is carried forward past the window —
+		// the last window before it.
+		const w = overNote
+			? [...windows].reverse().find((x) => !x.narrow && x.end < over)
+			: windows.find((x) => !x.narrow && x.start <= over && over <= x.end);
 		if (!w) break; // safety: never loop on an unscalable violation
 		let accIn = 0;
 		for (let t = 0; t < w.start; t++) {
@@ -451,6 +466,31 @@ export function shapeSafeReverse(points, budget, warn) {
 				p.to = orig[i].to < 0 ? orig[i].to * k : orig[i].to;
 			}
 		};
+		if (overNote) {
+			// Binary search the largest scale whose drift has fully repaid
+			// by the note's pulse.
+			const accAt = (k) => {
+				apply(k);
+				let a = 0;
+				for (let i = 0; i <= over; i++) {
+					const v = ignored[i] ? 0 : graph(i);
+					a = v < 0 ? a - v : Math.max(0, a - v);
+				}
+				return a;
+			};
+			// Even at zero scale an earlier window still owes at the note;
+			// drop this one and let the next pass target the earlier one.
+			if (accAt(0) > 1e-9) { apply(0); scaledWindows++; continue; }
+			let lo = 0;
+			let hi = 1;
+			for (let i = 0; i < 20; i++) {
+				const mid = (lo + hi) / 2;
+				if (accAt(mid) <= 1e-9) lo = mid; else hi = mid;
+			}
+			apply(lo);
+			scaledWindows++;
+			continue;
+		}
 		const area = (k) => {
 			apply(k);
 			let a = 0;
@@ -469,7 +509,7 @@ export function shapeSafeReverse(points, budget, warn) {
 		scaledWindows++;
 	}
 	if (scaledWindows) {
-		warn(`--safe-reverse scaled ${scaledWindows} reverse window(s) down to keep the scroll drift within ${budget} (4/4-measures of scroll distance); the game hides notes once the drift grows past that.`);
+		warn(`--safe-reverse scaled ${scaledWindows} reverse window(s) down to keep the scroll drift repaid before the next note and within ${budget} (4/4-measures of scroll distance); the game hides notes until the drift is repaid.`);
 	}
 	return scaledWindows;
 }
@@ -1818,10 +1858,21 @@ export function convertKsonToVox(chart, warn = () => {}, options = {}) {
 	// options.safeReverse shapes instead of flooring: negative windows are
 	// scaled down only as far as needed to keep the scroll drift (the
 	// accumulated deficit the engine has not yet repaid) within the
-	// visibility budget, so reverse stays as deep as notes allow.
+	// visibility budget, so reverse stays as deep as notes allow. On top
+	// of the budget, the drift must be fully repaid at every note pulse
+	// outside a reverse window — notes right after a reverse section are
+	// hidden until the deficit clears.
 	// options.safeReverseBudget overrides the default 0.5-measure budget.
 	if (options.safeReverse && scroll.length) {
-		shapeSafeReverse(scroll, Number.isFinite(options.safeReverseBudget) ? options.safeReverseBudget : 0.5, warn);
+		const notePulses = [
+			...btLanes.flat().flatMap((n) => (n.length > 0 ? [n.pulse, n.pulse + n.length] : [n.pulse])),
+			...fxLanes.flat().flatMap((n) => (n.length > 0 ? [n.pulse, n.pulse + n.length] : [n.pulse])),
+			...laserSections.flat().flatMap((section) => {
+				const pts = Array.isArray(section?.[1]) ? section[1] : [];
+				return pts.map((p) => p[0]);
+			}),
+		];
+		shapeSafeReverse(scroll, Number.isFinite(options.safeReverseBudget) ? options.safeReverseBudget : 0.5, warn, notePulses);
 	}
 	const stops = (Array.isArray(beat.stop) ? beat.stop : []).map((entry) => ({
 		pulse: Math.max(0, Math.round(Number(entry[0]))),

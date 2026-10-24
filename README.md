@@ -74,9 +74,13 @@ stayed visible, 2.8 hid notes for ~1.5 measures, and 7.4 for much longer.
 For each negative window the converter scales the magnitudes down (binary
 search) only as far as needed to keep the accumulated drift within the
 budget (default 0.5 measures; pass a number to override, e.g.
-`--safe-reverse 0.25`). Deep short reverse survives wherever it fits; long
-windows become gentle drifts; narrow slam spikes (<24 pulses) are skipped
-because the engine does not integrate them. Default output is unchanged.
+`--safe-reverse 0.25`). On top of the budget, the drift must be fully
+repaid at every note outside a reverse window — a note immediately after a
+reverse section stays hidden until the deficit clears, so the window ahead
+of it shrinks until it is repaid by then. Deep short reverse survives
+wherever it fits; long windows become gentle drifts; narrow slam spikes
+(<24 pulses) are skipped because the engine does not integrate them.
+Default output is unchanged.
 
 Diagnostics (camera approximations, native DSP fallbacks, dropped KSH lasers)
 are printed after the conversion summary line.

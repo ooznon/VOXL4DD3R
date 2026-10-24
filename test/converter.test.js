@@ -410,6 +410,53 @@ test("--safe-reverse bounds each reverse window to the drift budget", () => {
 	assert.ok(loose.maxDrift > safe.maxDrift, "a bigger budget allows deeper reverse");
 });
 
+test("--safe-reverse repays the drift before every note after a reverse window", () => {
+	// A note immediately after a reverse window stays hidden in game until
+	// the accumulated deficit is fully repaid at its pulse — the budget
+	// alone does not guarantee that (window area can be within budget while
+	// the repayment tail still runs past the note).
+	const chart = {
+		meta: {},
+		beat: {
+			bpm: [[0, 185]],
+			time_sig: [[0, [4, 4]]],
+			// Window 960..1920 (drift 1 measure), only partly repaid by the
+			// time the chip at 2400 arrives.
+			scroll_speed: [[0, 1], [960, [1, -2]], [2880, [2, 1]]],
+		},
+		note: { bt: [[[2400]], [], [], []], fx: [[], []], laser: [[], []] },
+	};
+	// Accumulated drift (4/4-measures) at one pulse over the emitted rows.
+	const accAt = (options, pulse) => {
+		const vox = convertKsonToVox(chart, () => {}, options);
+		const rows = section(vox, "SPCONTROLER").filter(r => r.includes("ManualSpeed"))
+			.map(r => {
+				const [pos, , , , spd] = r.split("\t");
+				const [m, b, tick] = pos.split(",").map(Number);
+				return { pulse: (m - 1) * 960 + (b - 1) * 240 + tick, spd: Number(spd.slice(1)) };
+			})
+			.sort((a, b) => a.pulse - b.pulse);
+		let acc = 0;
+		for (let i = 0; i < rows.length; i++) {
+			const next = i + 1 < rows.length ? rows[i + 1].pulse : pulse;
+			if (rows[i].pulse >= pulse) break;
+			const dt = Math.min(next, pulse) - rows[i].pulse;
+			if (dt <= 0) continue;
+			if (rows[i].spd < 0) acc += -rows[i].spd * dt;
+			else acc = Math.max(0, acc - rows[i].spd * dt);
+		}
+		return acc / 960;
+	};
+
+	// Default keeps full reverse, so the note sits deep in the un-repaid tail.
+	const base = accAt({}, 2400);
+	assert.ok(base > 0.1, `default leaves the note behind the deficit: ${base}`);
+
+	// safe-reverse scales the window until the drift is repaid by the note.
+	const safe = accAt({ safeReverse: true }, 2400);
+	assert.ok(safe < 0.01, `drift is repaid at the note's pulse: ${safe}`);
+});
+
 // ---------------------------------------------------------------------------
 // FX / BT notes
 // ---------------------------------------------------------------------------
